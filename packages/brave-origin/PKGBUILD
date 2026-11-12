@@ -1,0 +1,53 @@
+# KaOS port of the AUR brave-origin-bin package (maintainer there: brave <aur-release@brave.com>)
+#
+# Changes for KaOS:
+#  - package is named brave-origin (installs to /opt/brave-origin), no -bin suffix,
+#    matching the other brave package in this repo
+#  - no epoch (GitHub rewrites ':' in release asset names, which would break the repo)
+#  - x86_64 only (KaOS has no aarch64)
+#  - single source array; local files pinned with real checksums
+#  - dependencies use the KaOS names (ttf-freefont + ttf-liberation instead of the
+#    Arch virtual ttf-font; libgnome-keyring optdepend dropped, it is obsolete)
+#  - zip unpacked into its own folder, no pushd
+
+pkgname=brave-origin
+pkgver=1.99.56
+pkgrel=1
+pkgdesc='The minimalist browser from the makers of Brave (binary release)'
+arch=('x86_64')
+url='https://brave.com/origin/download'
+license=('MPL2')
+depends=('alsa-lib' 'gtk3' 'libxss' 'nss' 'ttf-freefont' 'ttf-liberation')
+optdepends=('cups: Printer support'
+            'libnotify: Native notification support')
+options=(!strip)
+source=("${pkgname}-${pkgver}.zip::https://github.com/brave/brave-browser/releases/download/v${pkgver}/brave-origin-${pkgver}-linux-amd64.zip"
+        "${pkgname}.sh"
+        "${pkgname}.desktop")
+noextract=("${pkgname}-${pkgver}.zip")
+sha256sums=('9c23fa625c124222c6c59d6d6f9819831838a715a7b8109c7f7ef8d85ec636a3'
+            'cd923e77e144bbb0e51c1040e86ffa12099258f88ee43f7c9cd944a3629ee824'
+            'c70bc71c696b6764247070375ae111bd76c8bad9c7bda4d46e03975b95571a8a')
+
+prepare() {
+    mkdir -p app
+    bsdtar -xf "${pkgname}-${pkgver}.zip" -C app
+    chmod +x app/brave app/brave-origin
+}
+
+package() {
+    install -dm0755 "${pkgdir}/opt"
+    cp -a "${srcdir}/app" "${pkgdir}/opt/${pkgname}"
+
+    # setuid sandbox helper (lets firejail users keep the suid sandbox working)
+    chmod 4755 "${pkgdir}/opt/${pkgname}/chrome-sandbox"
+
+    install -Dm0755 "${pkgname}.sh" "${pkgdir}/usr/bin/${pkgname}"
+    install -Dm0644 -t "${pkgdir}/usr/share/applications/" "${pkgname}.desktop"
+    install -Dm0644 -t "${pkgdir}/usr/share/licenses/${pkgname}/" "${srcdir}/app/LICENSE"
+
+    for size in 16x16 24x24 32x32 48x48 64x64 128x128 256x256; do
+        install -Dm0644 "${pkgdir}/opt/${pkgname}/product_logo_${size/x*/}.png" \
+            "${pkgdir}/usr/share/icons/hicolor/${size}/apps/brave-origin.png"
+    done
+}
