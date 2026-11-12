@@ -102,7 +102,14 @@ jobs:
                 --noconfirm -Sy base-devel git sudo pacman
               cp /kaos.conf /rootfs/etc/pacman.conf
               cp /etc/resolv.conf /rootfs/etc/resolv.conf
-            '
+              # the ca-certificates hook failed during install: run it again
+              chroot /rootfs /bin/bash -c "update-ca-certificates" || true
+              # last resort: copy the public CA bundle from this container
+              if [ ! -s /rootfs/etc/ssl/certs/ca-certificates.crt ]; then
+                mkdir -p /rootfs/etc/ssl/certs
+                cp -L /etc/ssl/certs/ca-certificates.crt /rootfs/etc/ssl/certs/ca-certificates.crt
+              fi
+              ls -l /rootfs/etc/ssl/certs/ca-certificates.crt
             '
 
       # ------------------------------------------------------------- iso
