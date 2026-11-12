@@ -60,9 +60,10 @@ command -v useradd >/dev/null || pacman -S --noconfirm --needed shadow
 id builder &>/dev/null || useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 chmod 0440 /etc/sudoers.d/builder
-# run a command as the unprivileged user without PAM (runuser/su need PAM config)
+# run a command as the unprivileged user without PAM or extra tools:
+# coreutils' chroot can switch uid/gid via --userspec (root's own "/" as the new root)
 as_builder() {
-  setpriv --reuid=builder --regid=builder --init-groups \
+  chroot --userspec=builder:builder / \
     env HOME=/home/builder USER=builder LOGNAME=builder PATH="$PATH" "$@"
 }
 rm -rf "$BUILD"; mkdir -p "$BUILD"
