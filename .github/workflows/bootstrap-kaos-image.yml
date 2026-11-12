@@ -97,13 +97,12 @@ jobs:
           docker run --rm --privileged \
             -v "$PWD/rootfs:/rootfs" -v "$PWD/kaos-pacman.conf:/kaos.conf:ro" \
             archlinux:latest bash -euxc '
-              mkdir -p /rootfs/var/lib/pacman /rootfs/etc
-              pacman --config /kaos.conf -r /rootfs \
-                --dbpath /rootfs/var/lib/pacman \
-                --cachedir /rootfs/var/cache/pacman/pkg \
+              mkdir -p /rootfs/var/lib/pacman /rootfs/var/cache/pacman/pkg /rootfs/var/log /rootfs/etc
+              pacman --config /kaos.conf -r /rootfs --disable-sandbox \
                 --noconfirm -Sy base-devel git sudo pacman
               cp /kaos.conf /rootfs/etc/pacman.conf
               cp /etc/resolv.conf /rootfs/etc/resolv.conf
+            '
             '
 
       # ------------------------------------------------------------- iso
