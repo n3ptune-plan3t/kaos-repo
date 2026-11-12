@@ -1,0 +1,167 @@
+name: bootstrap-kaos-image
+
+# Builds the KaOS build container and publishes it as
+# ghcr.io/<owner>/kaos-builder:latest.
+#
+#   - weekly (Sundays 03:00 UTC), using the repository variable KAOS_MIRROR
+#   - manually (Actions tab -> Run workflow)
+#   - automatically by build-repo.yml when the image does not exist yet
+#
+#   method=mirror : install base-devel into an empty root straight from the
+#                   KaOS repos (small, clean, recommended)
+#   method=iso    : unpack the root filesystem out of a KaOS ISO (fallback;
+#                   large, because a live ISO carries a whole desktop)
+#
+# Set the repository variable KAOS_MIRROR once (Settings -> Secrets and
+# variables -> Actions -> Variables) to the Server value from
+# /etc/pacman.d/mirrorlist on KaOS, keeping $repo, e.g. https://HOST/PATH/$repo
+
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+    inputs:
+      method:
+        description: "How to get the KaOS root filesystem"
+        type: choice
+        options: [mirror, iso]
+        default: mirror
+      mirror:
+        description: 'method=mirror: Server value from /etc/pacman.d/mirrorlist, keeping $repo (empty = use the KAOS_MIRROR variable)'
+        required: false
+      iso_url:
+        description: "method=iso: direct download URL of a KaOS x86_64 ISO"
+        required: false
+  workflow_call:
+    inputs:
+      method:
+        type: string
+        default: mirror
+      mirror:
+        type: string
+        default: ""
+      iso_url:
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: kaos-builder-image
+  cancel-in-progress: false
+
+jobs:
+  image:
+    # a scheduled run needs the KAOS_MIRROR variable; without it, skip quietly
+    if: github.event_name != 'schedule' || vars.KAOS_MIRROR != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      METHOD: ${{ inputs.method || 'mirror' }}
+      MIRROR: ${{ inputs.mirror || vars.KAOS_MIRROR }}
+      ISO_URL: ${{ inputs.iso_url }}
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/lib/android /opt/hostedtoolcache
+          df -h /
+
+      # ---------------------------------------------------------- mirror
+      - name: Root filesystem from KaOS repos
+        if: env.METHOD == 'mirror'
+        run: |
+          set -euo pipefail
+          [[ -n "$MIRROR" ]] || { echo "::error::no mirror: pass the 'mirror' input or set the KAOS_MIRROR repository variable"; exit 1; }
+          mkdir -p rootfs
+          cat > kaos-pacman.conf <<EOF
+          [options]
+          Architecture = x86_64
+          SigLevel = Never
+          LocalFileSigLevel = Never
+
+          [core]
+          Server = $MIRROR
+
+          [main]
+          Server = $MIRROR
+
+          [apps]
+          Server = $MIRROR
+          EOF
+          sed -i 's/^[[:space:]]*//' kaos-pacman.conf
+
+          # Arch's pacman is used purely as the installer; every file that
+          # lands in the root comes from the KaOS repositories.
+          docker run --rm --privileged \
+            -v "$PWD/rootfs:/rootfs" -v "$PWD/kaos-pacman.conf:/kaos.conf:ro" \
+            archlinux:latest bash -euxc '
+              mkdir -p /rootfs/var/lib/pacman /rootfs/etc
+              pacman --config /kaos.conf -r /rootfs \
+                --dbpath /rootfs/var/lib/pacman \
+                --cachedir /rootfs/var/cache/pacman/pkg \
+                --noconfirm -Sy base-devel git sudo pacman
+              cp /kaos.conf /rootfs/etc/pacman.conf
+              cp /etc/resolv.conf /rootfs/etc/resolv.conf
+            '
+
+      # ------------------------------------------------------------- iso
+      - name: Root filesystem from KaOS ISO
+        if: env.METHOD == 'iso'
+        run: |
+          set -euo pipefail
+          [[ -n "$ISO_URL" ]] || { echo "::error::the 'iso_url' input is required for method=iso"; exit 1; }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq squashfs-tools p7zip-full
+          curl -fL --retry 3 -o kaos.iso "$ISO_URL"
+          7z x -y -oiso kaos.iso -r '*.sfs' '*.squashfs' > /dev/null
+          rm -f kaos.iso
+          echo "squashfs candidates:"
+          find iso -type f \( -name '*.sfs' -o -name '*.squashfs' \) -printf '%s %p\n' | sort -n
+          SFS=$(find iso -type f \( -name '*.sfs' -o -name '*.squashfs' \) -printf '%s %p\n' | sort -n | tail -1 | cut -d' ' -f2-)
+          [[ -n "$SFS" ]] || { echo "::error::no squashfs found in the ISO"; exit 1; }
+          echo "using $SFS"
+          sudo unsquashfs -f -d rootfs "$SFS"
+          rm -rf iso
+          # some live images wrap the real root in an ext4 .img inside the squashfs
+          if [[ ! -x rootfs/usr/bin/pacman && ! -x rootfs/bin/pacman ]]; then
+            IMG=$(find rootfs -maxdepth 2 -name '*.img' | head -1)
+            [[ -n "$IMG" ]] || { echo "::error::no pacman in the rootfs and no nested .img; inspect the ISO layout"; exit 1; }
+            sudo mkdir -p /mnt/img rootfs2
+            sudo mount -o loop,ro "$IMG" /mnt/img
+            sudo cp -a /mnt/img/. rootfs2/
+            sudo umount /mnt/img
+            sudo rm -rf rootfs
+            sudo mv rootfs2 rootfs
+          fi
+          sudo rm -rf rootfs/var/cache/pacman/pkg/* || true
+
+      # ----------------------------------------------------------- push
+      - name: Import and push image
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY_OWNER,,}"
+          IMAGE="ghcr.io/${OWNER}/kaos-builder:latest"
+          # build date marker: ci/build.sh warns when the image gets old
+          date -u +%Y-%m-%d | sudo tee rootfs/etc/kaos-builder-image > /dev/null
+          sudo tar -C rootfs -c . | docker import \
+            --change 'CMD ["/bin/bash"]' \
+            --change 'ENV PATH=/usr/bin:/bin:/usr/sbin:/sbin' \
+            --change "LABEL org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY}" \
+            - "$IMAGE"
+          docker run --rm "$IMAGE" bash -c 'command -v pacman makepkg && pacman --version | head -3'
+          echo "$GH_TOKEN" | docker login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
+          docker push "$IMAGE"
+          echo "pushed $IMAGE"
+
+      # the previous image loses its :latest tag on push; remove those leftovers
+      - name: Remove old image versions
+        continue-on-error: true
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: kaos-builder
+          package-type: container
+          delete-only-untagged-versions: "true"

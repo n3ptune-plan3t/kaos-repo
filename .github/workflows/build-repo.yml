@@ -1,0 +1,199 @@
+name: build-repo
+
+# Builds packages/<name>/PKGBUILD inside the KaOS builder container and
+# publishes the pacman repository as assets of ONE GitHub Release (tag x86_64).
+#
+#   push to main      -> builds the package folders that changed
+#   manual run        -> "packages" input: names separated by space/comma,
+#                        or "all" / empty for everything (already-published
+#                        versions are skipped, so this is cheap)
+#
+# Packages build one at a time, in packages/build-order.txt order when that
+# file exists, and each one is published as soon as it is built.
+#
+# Users add:
+#   [<repo-name>]
+#   SigLevel = Optional TrustAll
+#   Server = https://github.com/<owner>/<repo-name>/releases/download/x86_64
+# The GitHub repository must be public for pacman to download without credentials.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/**"
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'Package folder names (space/comma separated), or "all". Empty = all'
+        required: false
+        default: ""
+      force:
+        description: "Rebuild even if the version is already published"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-repo
+  cancel-in-progress: false
+
+env:
+  TAG: x86_64
+  # pacman repo name = db file name = the [section] users put in pacman.conf
+  REPO_NAME: ${{ github.event.repository.name }}
+
+jobs:
+  # 1. decide what to build and whether the builder image exists
+  plan:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+      has_packages: ${{ steps.pick.outputs.has_packages }}
+      image_exists: ${{ steps.img.outputs.exists }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Builder image present?
+        id: img
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kaos-builder:latest"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if docker manifest inspect "$image" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::$image does not exist yet; it will be built first (needs the KAOS_MIRROR variable)"
+          fi
+
+      - name: Pick packages
+        id: pick
+        env:
+          INPUT_PACKAGES: ${{ inputs.packages }}
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          # every package folder, build-order.txt entries first
+          order() {
+            { [ -f packages/build-order.txt ] && sed -e 's/#.*//' -e 's/[[:space:]]*$//' -e '/^$/d' packages/build-order.txt || true
+              find packages -mindepth 2 -maxdepth 2 -name PKGBUILD -printf '%h\n' | xargs -r -n1 basename | sort
+            } | awk '!seen[$0]++' | while read -r p; do [ -f "packages/$p/PKGBUILD" ] && echo "$p"; done
+          }
+          if [ "$EVENT" = "workflow_dispatch" ]; then
+            want="$(echo "$INPUT_PACKAGES" | tr ', ' '\n\n' | sed '/^$/d')"
+            if [ -z "$want" ] || [ "$want" = "all" ]; then picked="$(order)"
+            else picked="$(order | grep -Fxf <(echo "$want") || true)"; fi
+          else
+            if echo "$BEFORE" | grep -qE '^0+$'; then
+              picked="$(order)"
+            else
+              changed="$(git diff --name-only "$BEFORE" "$GITHUB_SHA" -- packages | cut -d/ -f2 | sort -u)"
+              picked="$(order | grep -Fxf <(echo "$changed") || true)"
+            fi
+          fi
+          echo "building: $(echo "$picked" | tr '\n' ' ')"
+          if [ -z "$picked" ]; then
+            echo "has_packages=false" >> "$GITHUB_OUTPUT"
+            echo 'matrix={"package":[]}' >> "$GITHUB_OUTPUT"
+          else
+            echo "has_packages=true" >> "$GITHUB_OUTPUT"
+            echo "matrix=$(echo "$picked" | jq -R . | jq -sc '{package: .}')" >> "$GITHUB_OUTPUT"
+          fi
+
+  # 2. create the builder image on the very first run
+  image:
+    needs: plan
+    if: needs.plan.outputs.image_exists != 'true' && needs.plan.outputs.has_packages == 'true'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/bootstrap-kaos-image.yml
+    with:
+      method: mirror
+      mirror: ${{ vars.KAOS_MIRROR }}
+
+  # 3. one job per package, strictly one at a time
+  build:
+    needs: [plan, image]
+    if: >-
+      ${{ !cancelled()
+          && needs.plan.result == 'success'
+          && needs.plan.outputs.has_packages == 'true'
+          && (needs.image.result == 'success' || needs.image.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+    permissions:
+      contents: write   # create the release / upload assets
+      packages: read    # pull the builder image
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
+    name: build ${{ matrix.package }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      PKG: ${{ matrix.package }}
+      FORCE: ${{ inputs.force || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          sparse-checkout: |
+            /ci/
+            /packages/${{ matrix.package }}/
+          sparse-checkout-cone-mode: false
+
+      - name: What is already published
+        run: |
+          mkdir -p existing out
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release view "$TAG" -R "$GITHUB_REPOSITORY" --json assets -q '.assets[].name' > existing/assets.txt
+            gh release download "$TAG" -R "$GITHUB_REPOSITORY" -D existing -p "${REPO_NAME}.db.tar.gz" || true
+          else
+            : > existing/assets.txt
+          fi
+
+      - name: Build in the KaOS container
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/kaos-builder:latest"
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker pull "$image"
+          docker run --rm -v "$PWD:/work" -w /work \
+            -e PKG -e FORCE -e REPO_NAME -e TAG -e GITHUB_REPOSITORY \
+            "$image" bash ci/build.sh
+
+      - name: Publish to the release
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          pkgs=(out/*.pkg.tar.*)
+          if (( ${#pkgs[@]} == 0 )); then echo "nothing new to publish"; exit 0; fi
+
+          gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+              --title "$REPO_NAME packages" --latest=false \
+              --notes "pacman repository. Add [$REPO_NAME] with Server = https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+
+          # packages first, database last, so the db never points at a missing file
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "${pkgs[@]}"
+          dbs=()
+          for f in "out/$REPO_NAME.db" "out/$REPO_NAME.db.tar.gz" "out/$REPO_NAME.files" "out/$REPO_NAME.files.tar.gz"; do
+            [[ -f "$f" ]] && dbs+=("$f")
+          done
+          gh release upload "$TAG" -R "$GITHUB_REPOSITORY" --clobber "${dbs[@]}"
+
+          # finally remove the superseded versions (in parallel)
+          if [[ -s out/stale.txt ]]; then
+            xargs -a out/stale.txt -d '\n' -r -P 8 -I{} \
+              gh release delete-asset "$TAG" {} -R "$GITHUB_REPOSITORY" -y || true
+          fi

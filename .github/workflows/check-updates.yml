@@ -1,0 +1,39 @@
+name: check-updates
+
+# Daily: compare every packages/<name>/PKGBUILD with its upstream and keep
+# ONE issue per outdated package (opened, edited when upstream moves again,
+# closed once the PKGBUILD catches up). See scripts/check-updates.py.
+
+on:
+  schedule:
+    - cron: "17 5 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Only print what would happen to issues"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: check-updates
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check upstreams and sync issues
+        run: |
+          args=(--json updates.json --markdown updates.md --sync-issues)
+          [ "${{ inputs.dry_run }}" = "true" ] && args+=(--dry-run)
+          python3 scripts/check-updates.py "${args[@]}"
+      - name: Job summary
+        if: always()
+        run: '[ -f updates.md ] && cat updates.md >> "$GITHUB_STEP_SUMMARY" || true'
