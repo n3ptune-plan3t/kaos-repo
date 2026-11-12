@@ -56,6 +56,7 @@ echo "::group::Update build container"
 pacman -Syu --noconfirm --needed base-devel git sudo
 echo "::endgroup::"
 
+command -v useradd >/dev/null || pacman -S --noconfirm --needed shadow
 id builder &>/dev/null || useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 chmod 0440 /etc/sudoers.d/builder
