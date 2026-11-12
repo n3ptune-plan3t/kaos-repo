@@ -60,6 +60,11 @@ command -v useradd >/dev/null || pacman -S --noconfirm --needed shadow
 id builder &>/dev/null || useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 chmod 0440 /etc/sudoers.d/builder
+# run a command as the unprivileged user without PAM (runuser/su need PAM config)
+as_builder() {
+  setpriv --reuid=builder --regid=builder --init-groups \
+    env HOME=/home/builder USER=builder LOGNAME=builder PATH="$PATH" "$@"
+}
 rm -rf "$BUILD"; mkdir -p "$BUILD"
 work="$BUILD/$PKG"
 cp -a "$SRC" "$work"; chown -R builder:builder "$BUILD"
@@ -69,7 +74,7 @@ pkgname_of() {  # foo-1.2-1-x86_64.pkg.tar.zst -> foo
 }
 is_pkgfile() { [[ "$1" == *.pkg.tar.* && "$1" != *.sig ]]; }
 
-mapfile -t want < <(runuser -u builder -- bash -c "cd '$work' && makepkg --packagelist" 2>/dev/null | xargs -r -n1 basename)
+mapfile -t want < <(as_builder bash -c "cd '$work' && makepkg --packagelist" | xargs -r -n1 basename)
 echo "expected files: ${want[*]:-unknown}"
 
 # skip when everything is already published (-git/-svn/-hg compute pkgver at build time)
@@ -79,7 +84,14 @@ if [[ "$FORCE" != "true" && "$PKG" != *-git && "$PKG" != *-svn && "$PKG" != *-hg
   if $all_there; then echo "up to date, nothing to do"; exit 0; fi
 fi
 
-runuser -u builder -- bash -c "cd '$work' && makepkg -sf --noconfirm --needed ${MAKEPKG_FLAGS:-}"
+# install build/runtime dependencies as root (makepkg -s would need sudo + PAM)
+as_builder bash -c "cd '$work' && makepkg --printsrcinfo" > "$BUILD/$PKG.srcinfo"
+mapfile -t deps < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_x86_64)? = /{print $2}' "$BUILD/$PKG.srcinfo" | sort -u)
+echo "dependencies: ${deps[*]:-none}"
+if (( ${#deps[@]} )); then
+  pacman -S --noconfirm --needed "${deps[@]}"
+fi
+as_builder bash -c "cd '$work' && makepkg -f --noconfirm ${MAKEPKG_FLAGS:-}"
 
 mapfile -t new < <(cd "$work" && ls -1 ./*.pkg.tar.* 2>/dev/null | grep -v '\.sig$' | xargs -r -n1 basename)
 (( ${#new[@]} )) || { echo "::error::makepkg produced no package"; exit 1; }
