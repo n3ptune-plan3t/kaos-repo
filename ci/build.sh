@@ -52,11 +52,28 @@ Server = https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}
 EOF
 fi
 
-echo "::group::Update build container"
-pacman -Syu --noconfirm --needed base-devel git sudo
+# KaOS is a rolling release: bring the whole container up to date BEFORE any
+# package is built, so it is always built against the newest libraries. The
+# image is only rebuilt weekly, so this runs on every build. Mirrors can be
+# mid-sync or flaky, so retry; never build on a stale or half-updated system.
+sync_system() {
+  local try
+  for try in 1 2 3; do
+    if pacman -Syu --noconfirm --needed base-devel git sudo shadow; then
+      return 0
+    fi
+    echo "::warning::pacman -Syu failed (attempt $try/3), retrying in $((try * 10))s"
+    sleep $((try * 10))
+  done
+  echo "::error::pacman -Syu failed; refusing to build on a stale system"
+  return 1
+}
+
+echo "::group::Update build container (pacman -Syu)"
+sync_system
+pacman --version | sed -n '2p'
 echo "::endgroup::"
 
-command -v useradd >/dev/null || pacman -S --noconfirm --needed shadow
 id builder &>/dev/null || useradd -m builder
 echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
 chmod 0440 /etc/sudoers.d/builder
@@ -90,7 +107,12 @@ as_builder bash -c "cd '$work' && makepkg --printsrcinfo" > "$BUILD/$PKG.srcinfo
 mapfile -t deps < <(awk -F' = ' '/^[[:space:]]*(depends|makedepends|checkdepends)(_x86_64)? = /{print $2}' "$BUILD/$PKG.srcinfo" | sort -u)
 echo "dependencies: ${deps[*]:-none}"
 if (( ${#deps[@]} )); then
-  pacman -S --noconfirm --needed "${deps[@]}"
+  # if a mirror synced since the -Syu above (404 / stale db), upgrade again
+  # and retry once, so deps and the rest of the system stay consistent
+  pacman -S --noconfirm --needed "${deps[@]}" || {
+    echo "::warning::dependency install failed; running pacman -Syu and retrying"
+    pacman -Syu --noconfirm --needed "${deps[@]}"
+  }
 fi
 as_builder bash -c "cd '$work' && makepkg -f --noconfirm ${MAKEPKG_FLAGS:-}"
 
