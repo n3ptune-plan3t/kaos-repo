@@ -14,8 +14,4 @@ sha256sums=('e543a43d211fef8f52b96b2e7935e892581421f759cda4ae87563854ebc60573')
 package() {
   install -d "${pkgdir}/usr/share/blesh"
   cp -RpT "${srcdir}/ble-${pkgver}" "${pkgdir}/usr/share/blesh"
-
-  # license
-  install -Dm644 "${srcdir}/ble-${pkgver}/LICENSE.md" \
-    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }
