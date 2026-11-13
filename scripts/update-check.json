@@ -1,5 +1,5 @@
 {
   "_help": "Per package-folder overrides: skip, reason, repo, branch, tag_prefix, github_release (owner/repo), pypi",
-  "brave": { "github_release": "brave/brave-browser", "tag_prefix": "v" }
+  "brave": { "github_release": "brave/brave-browser", "tag_prefix": "v" },
   "brave-origin": { "github_release": "brave/brave-browser", "tag_prefix": "v" }
 }
