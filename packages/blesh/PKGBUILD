@@ -1,17 +1,22 @@
 pkgname=blesh
-_pkgname=ble.sh
-pkgver=0.3.4
+_pkgver=0.4.0-devel3
+_asset=ble-${_pkgver}-2
+pkgver=${_pkgver//-/_}
 pkgrel=1
-pkgdesc="Bash Line Editor (ble.sh) -- a replacement for Bash's line editor with enhanced features"
+pkgdesc='Bash Line Editor: with autosuggestions and syntax highlighting and more for bash'
 arch=('any')
 url='https://github.com/akinomyoga/ble.sh'
 license=('BSD-3-Clause')
 depends=('bash')
-options=('!strip')
-source=("https://github.com/akinomyoga/ble.sh/releases/download/v${pkgver}/ble-${pkgver}.tar.xz")
-sha256sums=('e543a43d211fef8f52b96b2e7935e892581421f759cda4ae87563854ebc60573')
+optdepends=('bash-completion: programmable completion integration')
+source=("${_asset}.tar.xz::https://github.com/akinomyoga/ble.sh/releases/download/v${_pkgver}/${_asset}.tar.xz")
+sha256sums=('bdcdcfff216495403adf82a701fe41675f64b64644dc77caabd3e015871ebd61')
 
 package() {
+  # prebuilt release: ble.sh is already generated, no build step needed
   install -d "${pkgdir}/usr/share/blesh"
-  cp -RpT "${srcdir}/ble-${pkgver}" "${pkgdir}/usr/share/blesh"
+  cp -RpT "${srcdir}/ble-${_pkgver}" "${pkgdir}/usr/share/blesh"
+
+  install -Dm644 "${srcdir}/ble-${_pkgver}/doc/LICENSE.md" \
+    "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE.md"
 }
