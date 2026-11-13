@@ -1,12 +1,12 @@
 name: check-updates
 
-# Daily: compare every packages/<name>/PKGBUILD with its upstream and keep
-# ONE issue per outdated package (opened, edited when upstream moves again,
-# closed once the PKGBUILD catches up). See scripts/check-updates.py.
+# Every 3 hours: compare every packages/<name>/PKGBUILD with its upstream and
+# keep ONE issue per outdated package (opened, edited when upstream moves
+# again, closed once the PKGBUILD catches up). See scripts/check-updates.py.
 
 on:
   schedule:
-    - cron: "17 5 * * *"
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
