@@ -1,11 +1,11 @@
 pkgname=swaybg
 pkgver=1.2.2
-pkgrel=1
+pkgrel=2
 pkgdesc='Wallpaper tool for Wayland compositors'
 arch=('x86_64')
 url='https://github.com/swaywm/swaybg'
 license=('MIT')
-depends=('wayland' 'cairo' 'gdk-pixbuf2')
+depends=('wayland' 'cairo' 'gdk-pixbuf2' 'shared-mime-info')
 makedepends=('meson' 'ninja' 'wayland-protocols' 'scdoc')
 source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
 sha256sums=('94e5c06a765d969e554b0f321f9cdf9c283a3fdaf70ad4e3d28163b21bd4d240')
