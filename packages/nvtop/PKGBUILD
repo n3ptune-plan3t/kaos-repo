@@ -1,0 +1,32 @@
+pkgname=nvtop
+pkgver=3.4.0
+pkgrel=2
+pkgdesc='GPU process monitor for AMD, Intel, NVIDIA and other accelerators (htop-like)'
+arch=('x86_64')
+url='https://github.com/Syllo/nvtop'
+license=('GPL3')
+depends=('ncurses' 'systemd')   # 'systemd' is provided by systemd-dinit on KaOS
+makedepends=('cmake' 'ninja' 'libdrm')
+optdepends=('nvidia-utils: NVIDIA GPU monitoring (provides libnvidia-ml)')
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/$pkgver.tar.gz")
+sha256sums=('7979f425dc2b748ff191e3999a0994af6154795e0e8640fae1e177684a296e08')
+
+build() {
+  cmake -S "$pkgname-$pkgver" -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DNVIDIA_SUPPORT=ON \
+    -DAMDGPU_SUPPORT=ON \
+    -DINTEL_SUPPORT=ON \
+    -DPANFROST_SUPPORT=ON \
+    -DPANTHOR_SUPPORT=ON \
+    -DMSM_SUPPORT=ON \
+    -DV3D_SUPPORT=ON \
+    -DTPU_SUPPORT=OFF \
+    -DBUILD_TESTING=OFF
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+}
