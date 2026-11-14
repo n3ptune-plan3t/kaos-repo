@@ -22,7 +22,18 @@ or the package is removed. It needs the `gh` CLI and GH_TOKEN.
 
 scripts/update-check.json overrides, per package folder name:
   skip (bool), repo (url), branch, tag_prefix, github_release ("owner/repo"),
-  pypi (project name), reason (why skipped)
+  pypi (project name), reason (why skipped),
+  current_var (name of the PKGBUILD variable that holds the real upstream
+               version, e.g. "_pkgver", when pkgver is a munged copy of it)
+
+The PKGBUILD version is resolved statically (no PKGBUILD code is executed):
+$var, ${var}, and the bash parameter expansions ${v//a/b} ${v/a/b} ${v/#a/b}
+${v/%a/b} ${v#p} ${v##p} ${v%p} ${v%%p} ${v:off:len} ${v^} ${v^^} ${v,}
+${v,,} ${v:-d} ${v:=d} ${v:+alt} ${#v}. If a version still cannot be
+resolved, the package is reported as an error/skipped, never as "outdated",
+and an already-open issue for it is left alone.
+
+  python3 scripts/check-updates.py --self-test        # run the built-in tests
 """
 import argparse
 import json
@@ -40,6 +51,7 @@ LABEL = "upstream-updates"
 HEX40 = re.compile(r"^[0-9a-f]{40}$")
 PRE_RE = re.compile(r"(?i)(^|[._\-])(rc|alpha|beta|pre|dev|snapshot|nightly|test|preview)\d*($|[._\-])")
 VCS_SUFFIXES = ("-git", "-svn", "-hg", "-bzr", "-nightly")
+UNRESOLVED = re.compile(r"[$`]")   # leftover shell syntax in a "resolved" value
 
 
 # ------------------------------------------------------------------ parsing
@@ -103,14 +115,245 @@ def parse_pkgbuild(path):
     return scalars, sources
 
 
-def expand(s, scalars):
-    for _ in range(6):
-        new = re.sub(r"\$\{(\w+)\}|\$(\w+)",
-                     lambda m: scalars.get(m.group(1) or m.group(2), m.group(0)), s)
-        if new == s:
-            break
-        s = new
-    return s
+class Unresolved(Exception):
+    """a ${...} construct that cannot be evaluated statically"""
+
+
+def _match_brace(s, i):
+    """index of the } closing a ${ whose body starts at i (nesting aware), or -1"""
+    depth = 1
+    while i < len(s):
+        if s[i] == "\\":
+            i += 2
+            continue
+        if s.startswith("${", i):
+            depth += 1
+            i += 2
+            continue
+        if s[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return i
+        i += 1
+    return -1
+
+
+def _glob_re(pat):
+    """bash pattern (* ? [...] \\x) -> compiled regex"""
+    out, i = [], 0
+    while i < len(pat):
+        c = pat[i]
+        if c == "\\" and i + 1 < len(pat):
+            out.append(re.escape(pat[i + 1]))
+            i += 2
+            continue
+        if c == "*":
+            out.append(".*")
+        elif c == "?":
+            out.append(".")
+        elif c == "[":
+            j = pat.find("]", i + 2)
+            if j == -1:
+                out.append(r"\[")
+            else:
+                body = pat[i + 1:j]
+                neg = body[:1] in ("!", "^")
+                if neg:
+                    body = body[1:]
+                out.append("[" + ("^" if neg else "") + body.replace("\\", "\\\\") + "]")
+                i = j
+        else:
+            out.append(re.escape(c))
+        i += 1
+    try:
+        return re.compile("".join(out), re.S)
+    except re.error as e:
+        raise Unresolved(str(e))
+
+
+def _strip(val, pat, front, longest):
+    """${v#p} ${v##p} (front) / ${v%p} ${v%%p} (back)"""
+    rx = _glob_re(pat)
+    idx = range(len(val) + 1)
+    if front:
+        for n in (reversed(idx) if longest else idx):
+            if rx.fullmatch(val[:n]):
+                return val[n:]
+    else:
+        for n in (idx if longest else reversed(idx)):
+            if rx.fullmatch(val[n:]):
+                return val[:n]
+    return val
+
+
+def _subst(val, pat, rep, mode):
+    """${v/p/r} (first) ${v//p/r} (all) ${v/#p/r} (prefix) ${v/%p/r} (suffix)"""
+    if pat == "":
+        return val
+    rx = _glob_re(pat)
+
+    def longest_at(i):
+        for j in range(len(val), i - 1, -1):
+            if rx.fullmatch(val, i, j):
+                return j
+        return None
+
+    if mode == "prefix":
+        j = longest_at(0)
+        return rep + val[j:] if j is not None else val
+    if mode == "suffix":
+        for i in range(len(val) + 1):
+            if rx.fullmatch(val, i, len(val)):
+                return val[:i] + rep
+        return val
+    out, i = [], 0
+    while i < len(val):
+        j = longest_at(i)
+        if j is not None and j > i:
+            out.append(rep)
+            i = j
+            if mode == "first":
+                out.append(val[i:])
+                return "".join(out)
+        else:
+            out.append(val[i])
+            i += 1
+    return "".join(out)
+
+
+def _split_slash(rest):
+    """'pat/rep' -> (pat, rep), splitting at the first unescaped /"""
+    i = 0
+    while i < len(rest):
+        if rest[i] == "\\":
+            i += 2
+            continue
+        if rest[i] == "/":
+            return rest[:i], rest[i + 1:].replace("\\/", "/")
+        i += 1
+    return rest, ""
+
+
+def _param(inner, scalars, depth):
+    """evaluate the body of one ${...}; anything unsupported is returned verbatim"""
+    raw = "${" + inner + "}"
+
+    def sub(t):
+        return expand(t, scalars, depth + 1)
+
+    def value(name):
+        v = sub(scalars[name])
+        if "$" in v:
+            raise Unresolved(name)
+        return v
+
+    try:
+        m = re.fullmatch(r"#([A-Za-z_]\w*)", inner)          # ${#var}
+        if m:
+            return str(len(value(m.group(1)))) if m.group(1) in scalars else raw
+        m = re.match(r"([A-Za-z_]\w*)(.*)$", inner, re.S)
+        if not m:
+            return raw
+        name, op = m.groups()
+        isset = name in scalars
+        if op == "":
+            return sub(scalars[name]) if isset else raw
+
+        # defaults: ${v:-d} ${v:=d} ${v:+alt} ${v-d} ${v=d} ${v+alt}
+        if op[:2] in (":-", ":=", ":+") or op[0] in "-=+":
+            colon = op[0] == ":"
+            kind, arg = (op[1], op[2:]) if colon else (op[0], op[1:])
+            val = sub(scalars[name]) if isset else ""
+            empty = (not isset) or (colon and val == "")
+            arg = sub(arg)
+            if kind in "-=":
+                return arg if empty else val
+            return "" if empty else arg
+
+        if not isset:
+            raise Unresolved(name)
+        val = value(name)
+
+        if op.startswith(":"):                                # ${v:off} ${v:off:len}
+            try:
+                nums = [int(x.strip().strip("()")) for x in sub(op[1:]).split(":")]
+            except ValueError:
+                raise Unresolved(op)
+            if len(nums) > 2:
+                raise Unresolved(op)
+            off = nums[0]
+            if off < 0:
+                off = max(len(val) + off, 0)
+            if len(nums) == 1:
+                return val[off:]
+            end = off + nums[1] if nums[1] >= 0 else len(val) + nums[1]
+            return val[off:end] if end > off else ""
+        if op == "^^":
+            return val.upper()
+        if op == "^":
+            return val[:1].upper() + val[1:]
+        if op == ",,":
+            return val.lower()
+        if op == ",":
+            return val[:1].lower() + val[1:]
+        for pre, mode in (("//", "all"), ("/#", "prefix"), ("/%", "suffix"), ("/", "first")):
+            if op.startswith(pre):
+                pat, rep = _split_slash(op[len(pre):])
+                return _subst(val, sub(pat), sub(rep), mode)
+        for pre, front, longest in (("##", True, True), ("#", True, False),
+                                    ("%%", False, True), ("%", False, False)):
+            if op.startswith(pre):
+                return _strip(val, sub(op[len(pre):]), front, longest)
+        raise Unresolved(op)
+    except Unresolved:
+        return raw
+
+
+def expand(s, scalars, depth=0):
+    """resolve $var / ${var} / ${var<bash parameter expansion>} using the
+    PKGBUILD's own scalars; names that are unknown are left as written"""
+    if depth > 8:                       # self-referencing variables
+        return s
+    out, i = [], 0
+    while i < len(s):
+        c = s[i]
+        if c == "$" and s.startswith("{", i + 1):
+            j = _match_brace(s, i + 2)
+            if j == -1:
+                out.append(s[i:])
+                break
+            out.append(_param(s[i + 2:j], scalars, depth))
+            i = j + 1
+            continue
+        if c == "$":
+            m = re.match(r"[A-Za-z_]\w*", s[i + 1:])
+            if m:
+                name = m.group(0)
+                out.append(expand(scalars[name], scalars, depth + 1) if name in scalars else "$" + name)
+                i += 1 + len(name)
+                continue
+        out.append(c)
+        i += 1
+    return "".join(out)
+
+
+def self_test():
+    s = {"_v": "0.4.0-devel3", "pkgver": "${_v//-/_}", "a": "ble-${_v}-2", "p": "1.2.3", "x": "$x"}
+    cases = [
+        ("${pkgver}", "0.4.0_devel3"), ("$a", "ble-0.4.0-devel3-2"),
+        ("${p%.*}", "1.2"), ("${p%%.*}", "1"), ("${p#*.}", "2.3"), ("${p##*.}", "3"),
+        ("${p/./_}", "1_2.3"), ("${p//./_}", "1_2_3"), ("${p:0:3}", "1.2"), ("${p: -1}", "3"),
+        ("${_v^^}", "0.4.0-DEVEL3"), ("${_v,,}", "0.4.0-devel3"), ("${missing:-x}", "x"),
+        ("${p:+yes}", "yes"), ("${#p}", "5"), ("${_v/#0/9}", "9.4.0-devel3"),
+        ("${_v/%3/9}", "0.4.0-devel9"), ("${p//${p%%.*}/X}", "X.2.3"),
+        ("${_v//[0-9]/N}", "N.N.N-develN"),
+        ("$missing", "$missing"), ("${p@U}", "${p@U}"), ("$x", "$x"),
+    ]
+    bad = [(i, exp, expand(i, s)) for i, exp in cases if expand(i, s) != exp]
+    for i, exp, got in bad:
+        print(f"FAIL {i!r}: expected {exp!r}, got {got!r}")
+    print(f"self-test: {len(cases) - len(bad)}/{len(cases)} passed")
+    return not bad
 
 
 # -------------------------------------------------------------- upstream info
@@ -200,12 +443,27 @@ def check_package(folder, root, cfg):
             return {**res, "status": "skipped", "note": "VCS package, tracks upstream HEAD"}
 
         scalars.setdefault("pkgname", name)
-        current = expand(scalars.get("pkgver", ""), scalars)
+        current = expand(scalars.get(o.get("current_var") or "pkgver", ""), scalars)
         srcs = [expand(clean_source(s), scalars) for s in sources]
         res["current"] = current
 
+        # Never call a package outdated on a version we could not read: report
+        # why instead (an existing issue is left untouched).  A pinned-commit
+        # package does not need pkgver, so that path ignores this.
+        bad = None
+        if not current:
+            bad = {"status": "skipped",
+                   "note": "no static pkgver (set by pkgver() or $(...)); set \"current_var\" "
+                           "or \"skip\" in scripts/update-check.json"}
+        elif UNRESOLVED.search(current):
+            bad = {"status": "error",
+                   "note": f"version '{current}' cannot be resolved statically; set \"current_var\" "
+                           "(e.g. \"_pkgver\") or \"skip\" in scripts/update-check.json"}
+
         # 1. configured GitHub release channel
         if o.get("github_release"):
+            if bad:
+                return {**res, **bad}
             slug = o["github_release"]
             tag = http_json(f"https://api.github.com/repos/{slug}/releases/latest")["tag_name"]
             res.update(kind="release", source=f"https://github.com/{slug}",
@@ -228,6 +486,8 @@ def check_package(folder, root, cfg):
                     v = expand(v, scalars)
                     if HEX40.match(v) and any(v in s for s in srcs):
                         pinned = v
+            if bad and not (pinned and repo):
+                return {**res, **bad}
             pypi = o.get("pypi")
             if not pypi:
                 for s in srcs:
@@ -336,7 +596,10 @@ def main():
     ap.add_argument("--markdown", help="write a markdown summary")
     ap.add_argument("--sync-issues", action="store_true", help="open/edit/close one issue per package")
     ap.add_argument("--dry-run", action="store_true", help="with --sync-issues: only print what would happen")
+    ap.add_argument("--self-test", action="store_true", help="test the PKGBUILD version resolver and exit")
     a = ap.parse_args()
+    if a.self_test:
+        sys.exit(0 if self_test() else 1)
 
     cfg = {}
     if Path(a.config).is_file():
