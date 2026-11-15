@@ -20,7 +20,7 @@ sha256sums=('c26bc87b8e1603e194f9793db58667722672a6c26dfc0e080a4b2afe35fe2583'
 prepare() {
   cd "${srcdir}/${_pkgname}-${pkgver}"
   patch -Np1 -i "${srcdir}/${_pkgname}-shenanigans.patch"
-  patch -Np2 -i "${srcdir}/kdeglobal-shenanigans.patch"
+  patch -Np1 -i "${srcdir}/kdeglobal-shenanigans.patch"
 }
 
 build() {
