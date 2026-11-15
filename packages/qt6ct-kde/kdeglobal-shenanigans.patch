@@ -1,0 +1,49 @@
+--- a/src/qt6ct/appearancepage.cpp
++++ b/src/qt6ct/appearancepage.cpp
+@@ -10,11 +10,47 @@
+ }
+ 
+ #ifdef KF_CONFIGCORE_LIB
++//Copies a config group together with its subgroups, e.g. [Colors:Header][Inactive]
++static void copyGroupRecursive(const KConfigGroup &src, KConfigGroup dst)
++{
++    const QMap<QString, QString> entries = src.entryMap();
++    for(auto it = entries.cbegin(); it != entries.cend(); ++it)
++        dst.writeEntry(it.key().toUtf8().constData(), it.value());
++    for(const QString &sub : src.groupList())
++        copyGroupRecursive(src.group(sub), dst.group(sub));
++}
++
+ void AppearancePage::writeSettings(KSharedConfigPtr config)
+ {
+     KConfigGroup group(config, "KDE");
+     group.writeEntry("widgetStyle", "qt6ct-style");
+     group.sync();
++
++    //Styles like Oxygen build hover/focus colors (DecorationHover/DecorationFocus) from KColorScheme
++    //using their own KConfig, so they ignore both the qt6ct palette and KDE_COLOR_SCHEME_PATH and
++    //fall back to the values in kdeglobals. Mirror the selected KColorScheme there.
++    const QString schemePath = Qt6CT::resolvePath(m_ui->colorSchemeComboBox->currentData().toString());
++    if(!Qt6CT::isKColorScheme(schemePath) || !QFileInfo::exists(schemePath))
++        return;
++
++    KConfig scheme(schemePath, KConfig::SimpleConfig);
++    for(const QString &name : scheme.groupList())
++    {
++        if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
++            copyGroupRecursive(KConfigGroup(&scheme, name), KConfigGroup(config, name));
++    }
++
++    const KConfigGroup srcKde(&scheme, "KDE");
++    for(const char *key : { "contrast", "frameContrast" })
++    {
++        if(srcKde.hasKey(key))
++            group.writeEntry(key, srcKde.readEntry(key, QString()));
++    }
++
++    KConfigGroup general(config, "General");
++    general.writeEntry("ColorScheme", QFileInfo(schemePath).baseName());
++    general.writeEntry("Name", KConfigGroup(&scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
++    config->sync();
+ }
+ #endif
