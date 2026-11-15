@@ -11,7 +11,7 @@ makedepends=('cmake' 'qt6-tools')
 conflicts=($_pkgname)
 provides=($_pkgname)
 source=("https://www.opencode.net/trialuser/qt6ct/-/archive/${pkgver}/${_pkgname}-${pkgver}.tar.bz2"
-        "{_pkgname}-shenanigans.patch")
+        "${_pkgname}-shenanigans.patch")
 sha256sums=('c26bc87b8e1603e194f9793db58667722672a6c26dfc0e080a4b2afe35fe2583'
             'baab2b714ad490de3a12edd5d4ec0f6223eded034d66a694989e746b86d1f420')
 
