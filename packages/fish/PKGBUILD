@@ -1,0 +1,60 @@
+pkgname=fish
+pkgver=4.9.3
+pkgrel=1
+pkgdesc='Smart and user friendly shell intended mostly for interactive use'
+url='https://fishshell.com/'
+arch=(x86_64)
+license=('GPL-2.0-only AND BSD-3-Clause AND ISC AND MIT AND PSF-2.0')
+depends=(glibc gcc-libs pcre2)
+makedepends=(cmake rust python3-sphinx)
+optdepends=(
+  'python3: man page completion parser / web config tool'
+  'pkgfile: command-not-found hook'
+  'groff: --help for built-in commands'
+  'xclip: X11 clipboard integration'
+  'wl-clipboard: Wayland clipboard integration'
+)
+install=fish.install
+backup=(etc/fish/config.fish)
+source=("https://github.com/fish-shell/fish-shell/releases/download/${pkgver}/${pkgname}-${pkgver}.tar.xz")
+sha256sums=('20998a25f73217ddcc19f499055fd587e9912d1ad6e7109120fbcf2871f0b98c'
+            '9bce69df3acfe0f1a69e8dd91fab23fad319e3e9f6f4ff050685d75e811a4232')
+
+prepare() {
+  cd ${pkgname}-${pkgver}
+
+  cargo fetch --locked
+}
+
+build() {
+  cd ${pkgname}-${pkgver}
+
+  export CXXFLAGS+=" ${CPPFLAGS}"
+
+  local cmake_options=(
+    -B build
+    -D CMAKE_INSTALL_PREFIX=/usr
+    -D CMAKE_INSTALL_SYSCONFDIR=/etc
+    -D CMAKE_BUILD_TYPE=Release
+    -D WITH_DOCS=ON
+    -D FISH_USE_SYSTEM_PCRE2=ON
+    -D WITH_MESSAGE_LOCALIZATION=ON
+    -W no-dev
+  )
+  cmake "${cmake_options[@]}"
+
+  make -C build VERBOSE=1
+}
+
+# Tests need python-pexpect, which isn't in the KaOS repos.
+# To enable later: add checkdepends=(expect procps-ng python3-pexpect)
+# check() {
+#   cd ${pkgname}-${pkgver}
+#   cmake --build build --target fish_run_tests
+# }
+
+package() {
+  cd ${pkgname}-${pkgver}
+
+  DESTDIR="$pkgdir" cmake --install build
+}
