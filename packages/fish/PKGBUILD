@@ -6,7 +6,7 @@ url='https://fishshell.com/'
 arch=(x86_64)
 license=('GPL-2.0-only AND BSD-3-Clause AND ISC AND MIT AND PSF-2.0')
 depends=(glibc gcc-libs pcre2)
-makedepends=(cmake rust python3-sphinx)
+makedepends=(cmake rust python3-sphinx python3-snowballstemmer)
 optdepends=(
   'python3: man page completion parser / web config tool'
   'pkgfile: command-not-found hook'
