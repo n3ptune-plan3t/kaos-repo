@@ -19,15 +19,17 @@
      QSettings settings(filePath, QSettings::IniFormat);
 --- a/src/qt6ct/appearancepage.cpp
 +++ b/src/qt6ct/appearancepage.cpp
-@@ -3,6 +3,7 @@
+@@ -3,6 +3,9 @@
  #include <QStringList>
  #ifdef KF_CONFIGCORE_LIB
  #include <KConfigGroup>
 +#include "kcolorschemefill.h"
++#include <QCryptographicHash>
++#include <QFile>
  #endif
  #include <qpa/qplatformthemefactory_p.h>
  #include <qpa/qplatformtheme.h>
-@@ -79,6 +80,35 @@
+@@ -79,6 +82,58 @@
      KConfigGroup group(config, "KDE");
      group.writeEntry("widgetStyle", "qt6ct-style");
      group.sync();
@@ -36,9 +38,25 @@
 +    //Styles like Oxygen build hover/focus colors (DecorationHover/DecorationFocus) from KColorScheme
 +    //using their own KConfig, so they ignore both the qt6ct palette and KDE_COLOR_SCHEME_PATH and
 +    //fall back to the values in kdeglobals. Mirror the selected KColorScheme there.
++    //The selected scheme replaces whatever an earlier scheme left in kdeglobals; "Default", "Style's colors"
++    //and qt6ct palettes remove it, so that nothing of an earlier scheme is left behind.
++    for(const QString &name : config->groupList())
++    {
++        if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
++            config->deleteGroup(name);
++    }
++    for(const char *key : { "contrast", "frameContrast" })
++        group.deleteEntry(key);
++    KConfigGroup general(config, "General");
++    for(const char *key : { "ColorScheme", "Name", "ColorSchemeHash" })
++        general.deleteEntry(key);
++
 +    const QString schemePath = Qt6CT::resolvePath(m_ui->colorSchemeComboBox->currentData().toString());
 +    if(!Qt6CT::isKColorScheme(schemePath) || !QFileInfo::exists(schemePath))
++    {
++        config->sync();
 +        return;
++    }
 +
 +    //gaps in the scheme (no hover/focus colors, no Complementary group...) are filled in, see kcolorschemefill.h
 +    const KSharedConfigPtr scheme = Qt6CTColors::loadCompletedColorScheme(schemePath);
@@ -55,7 +73,14 @@
 +            group.writeEntry(key, srcKde.readEntry(key, QString()));
 +    }
 +
-+    KConfigGroup general(config, "General");
++    //same as KDE's own scheme applier: remember which scheme file this is
++    QFile schemeFile(schemePath);
++    if(schemeFile.open(QIODevice::ReadOnly))
++    {
++        QCryptographicHash hash(QCryptographicHash::Sha1);
++        hash.addData(&schemeFile);
++        general.writeEntry("ColorSchemeHash", QString::fromLatin1(hash.result().toHex()));
++    }
 +    general.writeEntry("ColorScheme", QFileInfo(schemePath).baseName());
 +    general.writeEntry("Name", KConfigGroup(scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
 +    config->sync();
