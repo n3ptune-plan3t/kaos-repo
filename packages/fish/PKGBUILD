@@ -6,11 +6,10 @@ url='https://fishshell.com/'
 arch=(x86_64)
 license=('GPL-2.0-only AND BSD-3-Clause AND ISC AND MIT AND PSF-2.0')
 depends=(glibc gcc-libs pcre2)
-makedepends=(cmake rust python3-sphinx python3-snowballstemmer)
+makedepends=(cmake rust)
 optdepends=(
   'python3: man page completion parser / web config tool'
   'pkgfile: command-not-found hook'
-  'groff: --help for built-in commands'
   'xclip: X11 clipboard integration'
   'wl-clipboard: Wayland clipboard integration'
 )
@@ -29,13 +28,15 @@ build() {
   cd ${pkgname}-${pkgver}
 
   export CXXFLAGS+=" ${CPPFLAGS}"
+  # Skip man pages (Sphinx and its Python deps are not fully packaged on KaOS)
+  export FISH_BUILD_DOCS=0
 
   local cmake_options=(
     -B build
     -D CMAKE_INSTALL_PREFIX=/usr
     -D CMAKE_INSTALL_SYSCONFDIR=/etc
     -D CMAKE_BUILD_TYPE=Release
-    -D WITH_DOCS=ON
+    -D WITH_DOCS=OFF
     -D FISH_USE_SYSTEM_PCRE2=ON
     -D WITH_MESSAGE_LOCALIZATION=ON
     -W no-dev
@@ -45,15 +46,10 @@ build() {
   make -C build VERBOSE=1
 }
 
-# Tests need python-pexpect, which isn't in the KaOS repos.
-# To enable later: add checkdepends=(expect procps-ng python3-pexpect)
-# check() {
-#   cd ${pkgname}-${pkgver}
-#   cmake --build build --target fish_run_tests
-# }
-
 package() {
   cd ${pkgname}-${pkgver}
 
   DESTDIR="$pkgdir" cmake --install build
 }
+
+# vim: ts=2 sw=2 et:
