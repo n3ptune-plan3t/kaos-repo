@@ -17,8 +17,7 @@ optdepends=(
 install=fish.install
 backup=(etc/fish/config.fish)
 source=("https://github.com/fish-shell/fish-shell/releases/download/${pkgver}/${pkgname}-${pkgver}.tar.xz")
-sha256sums=('20998a25f73217ddcc19f499055fd587e9912d1ad6e7109120fbcf2871f0b98c'
-            '9bce69df3acfe0f1a69e8dd91fab23fad319e3e9f6f4ff050685d75e811a4232')
+sha256sums=('20998a25f73217ddcc19f499055fd587e9912d1ad6e7109120fbcf2871f0b98c')
 
 prepare() {
   cd ${pkgname}-${pkgver}
