@@ -1,7 +1,7 @@
 _pkgname=qt6ct
 pkgname=qt6ct-kde
 pkgver=0.11
-pkgrel=9
+pkgrel=10
 pkgdesc='Program that allows users to configure Qt6 settings (theme, font, icons, etc.) under a DE/WM without Qt integration.'
 arch=('x86_64')
 url='https://www.opencode.net/trialuser/qt6ct'
@@ -15,7 +15,7 @@ source=("https://www.opencode.net/trialuser/qt6ct/-/archive/${pkgver}/${_pkgname
         "kdeglobal-shenanigans.patch")
 sha256sums=('c26bc87b8e1603e194f9793db58667722672a6c26dfc0e080a4b2afe35fe2583'
             'baab2b714ad490de3a12edd5d4ec0f6223eded034d66a694989e746b86d1f420'
-            '22dc318236b116a54266b53e460a3a62b606750c3b6d8cc7e529c52a18722031')
+            '067f49ecdc80e584a30d1354f483c219fa5f057570f6059e7d74ab1d7e5fd924')
 
 prepare() {
   cd "${srcdir}/${_pkgname}-${pkgver}"

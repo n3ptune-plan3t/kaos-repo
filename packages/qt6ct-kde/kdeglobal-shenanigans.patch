@@ -1,25 +1,38 @@
+--- a/src/qt6ct-common/qt6ct.cpp
++++ b/src/qt6ct-common/qt6ct.cpp
+@@ -3,6 +3,7 @@
+ #include <QtDebug>
+ #if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
+ #include <KSharedConfig>
++#include "kcolorschemefill.h"
+ #include <KColorScheme>
+ #endif
+ #include "qt6ct.h"
+@@ -79,7 +80,7 @@
+ 
+ #if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
+     if(isKColorScheme(filePath))
+-        return KColorScheme::createApplicationPalette(KSharedConfig::openConfig(filePath));
++        return KColorScheme::createApplicationPalette(Qt6CTColors::loadCompletedColorScheme(filePath));
+ #endif
+ 
+     QSettings settings(filePath, QSettings::IniFormat);
 --- a/src/qt6ct/appearancepage.cpp
 +++ b/src/qt6ct/appearancepage.cpp
-@@ -10,11 +10,47 @@
- }
- 
+@@ -3,6 +3,7 @@
+ #include <QStringList>
  #ifdef KF_CONFIGCORE_LIB
-+//Copies a config group together with its subgroups, e.g. [Colors:Header][Inactive]
-+static void copyGroupRecursive(const KConfigGroup &src, KConfigGroup dst)
-+{
-+    const QMap<QString, QString> entries = src.entryMap();
-+    for(auto it = entries.cbegin(); it != entries.cend(); ++it)
-+        dst.writeEntry(it.key().toUtf8().constData(), it.value());
-+    for(const QString &sub : src.groupList())
-+        copyGroupRecursive(src.group(sub), dst.group(sub));
-+}
-+
- void AppearancePage::writeSettings(KSharedConfigPtr config)
- {
+ #include <KConfigGroup>
++#include "kcolorschemefill.h"
+ #endif
+ #include <qpa/qplatformthemefactory_p.h>
+ #include <qpa/qplatformtheme.h>
+@@ -79,6 +80,35 @@
      KConfigGroup group(config, "KDE");
      group.writeEntry("widgetStyle", "qt6ct-style");
      group.sync();
 +
++#ifdef KF_COLORSCHEME_LIB
 +    //Styles like Oxygen build hover/focus colors (DecorationHover/DecorationFocus) from KColorScheme
 +    //using their own KConfig, so they ignore both the qt6ct palette and KDE_COLOR_SCHEME_PATH and
 +    //fall back to the values in kdeglobals. Mirror the selected KColorScheme there.
@@ -27,14 +40,15 @@
 +    if(!Qt6CT::isKColorScheme(schemePath) || !QFileInfo::exists(schemePath))
 +        return;
 +
-+    KConfig scheme(schemePath, KConfig::SimpleConfig);
-+    for(const QString &name : scheme.groupList())
++    //gaps in the scheme (no hover/focus colors, no Complementary group...) are filled in, see kcolorschemefill.h
++    const KSharedConfigPtr scheme = Qt6CTColors::loadCompletedColorScheme(schemePath);
++    for(const QString &name : scheme->groupList())
 +    {
 +        if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
-+            copyGroupRecursive(KConfigGroup(&scheme, name), KConfigGroup(config, name));
++            Qt6CTColors::copyGroupRecursive(KConfigGroup(scheme, name), KConfigGroup(config, name));
 +    }
 +
-+    const KConfigGroup srcKde(&scheme, "KDE");
++    const KConfigGroup srcKde(scheme, "KDE");
 +    for(const char *key : { "contrast", "frameContrast" })
 +    {
 +        if(srcKde.hasKey(key))
@@ -43,7 +57,113 @@
 +
 +    KConfigGroup general(config, "General");
 +    general.writeEntry("ColorScheme", QFileInfo(schemePath).baseName());
-+    general.writeEntry("Name", KConfigGroup(&scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
++    general.writeEntry("Name", KConfigGroup(scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
 +    config->sync();
++#endif
  }
  #endif
+ 
+--- /dev/null
++++ b/src/qt6ct-common/kcolorschemefill.h
+@@ -0,0 +1,101 @@
++#ifndef KCOLORSCHEMEFILL_H
++#define KCOLORSCHEMEFILL_H
++
++#if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
++#include <QMap>
++#include <QString>
++#include <QStringList>
++#include <KConfig>
++#include <KConfigGroup>
++#include <KSharedConfig>
++
++//Loads a KColorScheme (.colors) file into an anonymous in-memory config and fills in what the file
++//leaves out, so that KColorScheme does not fall back to its built-in blue defaults:
++// - a missing Complementary group is taken from Tooltip (or Window); KColorScheme already derives
++//   Header from Window by itself
++// - a missing DecorationFocus / DecorationHover is taken from the other one of the same group, then
++//   from Window / View / Button, then from the scheme's Selection background (its accent color)
++//The file itself is never modified.
++namespace Qt6CTColors
++{
++inline void copyGroupRecursive(const KConfigGroup &src, KConfigGroup dst)
++{
++    const QMap<QString, QString> entries = src.entryMap();
++    for(auto it = entries.cbegin(); it != entries.cend(); ++it)
++        dst.writeEntry(it.key().toUtf8().constData(), it.value());
++    for(const QString &sub : src.groupList())
++        copyGroupRecursive(src.group(sub), dst.group(sub));
++}
++
++inline QString readKey(const KSharedConfigPtr &c, const QString &group, const char *key)
++{
++    return KConfigGroup(c, group).readEntry(key, QString());
++}
++
++inline void fillMissingColors(const KSharedConfigPtr &c)
++{
++    const QStringList groups = c->groupList();
++    auto has = [&](const char *g) { return groups.contains(QLatin1String(g)); };
++
++    QStringList donors;
++    for(const char *g : { "Colors:Window", "Colors:View", "Colors:Button" })
++        if(has(g))
++            donors << QLatin1String(g);
++    if(donors.isEmpty())
++        return; //nothing sensible to derive from
++
++    //whole groups that are optional in practice
++    if(!has("Colors:Complementary"))
++        copyGroupRecursive(KConfigGroup(c, has("Colors:Tooltip") ? "Colors:Tooltip" : "Colors:Window"),
++                           KConfigGroup(c, "Colors:Complementary"));
++
++    //hover / focus decoration colors of every set
++    QString accent;
++    if(has("Colors:Selection"))
++        accent = readKey(c, QStringLiteral("Colors:Selection"), "BackgroundNormal");
++
++    auto fillDecoration = [&](KConfigGroup g, const QStringList &from) {
++        const char *keys[2] = { "DecorationFocus", "DecorationHover" };
++        const char *sibling[2] = { "DecorationHover", "DecorationFocus" };
++        for(int i = 0; i < 2; ++i)
++        {
++            if(!g.readEntry(keys[i], QString()).isEmpty())
++                continue;
++            QString v = g.readEntry(sibling[i], QString()); //same group first
++            for(int j = 0; v.isEmpty() && j < from.count(); ++j)
++                v = readKey(c, from.at(j), keys[i]);
++            for(int j = 0; v.isEmpty() && j < from.count(); ++j)
++                v = readKey(c, from.at(j), sibling[i]);
++            if(v.isEmpty())
++                v = accent;
++            if(!v.isEmpty())
++                g.writeEntry(keys[i], v);
++        }
++    };
++    for(const QString &name : donors) //donors first, so that the others can follow them
++    {
++        QStringList others = donors;
++        others.removeAll(name);
++        fillDecoration(KConfigGroup(c, name), others);
++    }
++    for(const char *g : { "Colors:Selection", "Colors:Tooltip", "Colors:Complementary" })
++        if(c->groupList().contains(QLatin1String(g)))
++            fillDecoration(KConfigGroup(c, g), donors);
++}
++
++inline KSharedConfigPtr loadCompletedColorScheme(const QString &filePath)
++{
++    //anonymous configs are cached and shared, so drop what a previous load left in it
++    KSharedConfigPtr out = KSharedConfig::openConfig(QString(), KConfig::SimpleConfig);
++    for(const QString &g : out->groupList())
++        out->deleteGroup(g);
++
++    KConfig src(filePath, KConfig::SimpleConfig);
++    for(const QString &g : src.groupList())
++        copyGroupRecursive(KConfigGroup(&src, g), KConfigGroup(out, g));
++    fillMissingColors(out);
++    return out;
++}
++}
++#endif
++#endif
