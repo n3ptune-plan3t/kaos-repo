@@ -1,7 +1,7 @@
 _pkgname=qt6ct
 pkgname=qt6ct-kde
 pkgver=0.11
-pkgrel=11
+pkgrel=12
 pkgdesc='Program that allows users to configure Qt6 settings (theme, font, icons, etc.) under a DE/WM without Qt integration.'
 arch=('x86_64')
 url='https://www.opencode.net/trialuser/qt6ct'
