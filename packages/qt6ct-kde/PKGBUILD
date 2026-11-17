@@ -15,7 +15,7 @@ source=("https://www.opencode.net/trialuser/qt6ct/-/archive/${pkgver}/${_pkgname
         "kdeglobal-shenanigans.patch")
 sha256sums=('c26bc87b8e1603e194f9793db58667722672a6c26dfc0e080a4b2afe35fe2583'
             'baab2b714ad490de3a12edd5d4ec0f6223eded034d66a694989e746b86d1f420'
-            '1bdc0442c82488b4c4a6f352d0882337463bf0003aff3e1a69e6ab377bad9df6')
+            '8f0cce111a1286c8e50ea858be65f5a5510bcce13360e1386565d0cfd910f52c')
 
 prepare() {
   cd "${srcdir}/${_pkgname}-${pkgver}"

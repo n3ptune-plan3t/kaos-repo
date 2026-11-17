@@ -4,7 +4,7 @@
  #include <QtDebug>
  #if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
  #include <KSharedConfig>
-+#include "kcolorschemefill.h"
++#include "kcolorschemeload.h"
  #include <KColorScheme>
  #endif
  #include "qt6ct.h"
@@ -13,7 +13,7 @@
  #if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
      if(isKColorScheme(filePath))
 -        return KColorScheme::createApplicationPalette(KSharedConfig::openConfig(filePath));
-+        return KColorScheme::createApplicationPalette(Qt6CTColors::loadCompletedColorScheme(filePath));
++        return KColorScheme::createApplicationPalette(Qt6CTColors::loadColorScheme(filePath));
  #endif
  
      QSettings settings(filePath, QSettings::IniFormat);
@@ -23,23 +23,23 @@
  #include <QStringList>
  #ifdef KF_CONFIGCORE_LIB
  #include <KConfigGroup>
-+#include "kcolorschemefill.h"
++#include "kcolorschemeload.h"
 +#include <QCryptographicHash>
 +#include <QFile>
  #endif
  #include <qpa/qplatformthemefactory_p.h>
  #include <qpa/qplatformtheme.h>
-@@ -79,6 +82,58 @@
+@@ -79,6 +82,57 @@
      KConfigGroup group(config, "KDE");
      group.writeEntry("widgetStyle", "qt6ct-style");
      group.sync();
-+
 +#ifdef KF_COLORSCHEME_LIB
 +    //Styles like Oxygen build hover/focus colors (DecorationHover/DecorationFocus) from KColorScheme
 +    //using their own KConfig, so they ignore both the qt6ct palette and KDE_COLOR_SCHEME_PATH and
 +    //fall back to the values in kdeglobals. Mirror the selected KColorScheme there.
 +    //The selected scheme replaces whatever an earlier scheme left in kdeglobals; "Default", "Style's colors"
 +    //and qt6ct palettes remove it, so that nothing of an earlier scheme is left behind.
++    //Whatever the scheme leaves out is not filled in: KColorScheme then uses its own defaults.
 +    for(const QString &name : config->groupList())
 +    {
 +        if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
@@ -52,65 +52,70 @@
 +        general.deleteEntry(key);
 +
 +    const QString schemePath = Qt6CT::resolvePath(m_ui->colorSchemeComboBox->currentData().toString());
-+    if(!Qt6CT::isKColorScheme(schemePath) || !QFileInfo::exists(schemePath))
++    if(Qt6CT::isKColorScheme(schemePath) && QFileInfo::exists(schemePath))
 +    {
-+        config->sync();
-+        return;
-+    }
++        const KSharedConfigPtr scheme = Qt6CTColors::loadColorScheme(schemePath);
++        for(const QString &name : scheme->groupList())
++        {
++            if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
++                Qt6CTColors::copyGroupRecursive(KConfigGroup(scheme, name), KConfigGroup(config, name));
++        }
 +
-+    //gaps in the scheme (no hover/focus colors, no Complementary group...) are filled in, see kcolorschemefill.h
-+    const KSharedConfigPtr scheme = Qt6CTColors::loadCompletedColorScheme(schemePath);
-+    for(const QString &name : scheme->groupList())
-+    {
-+        if(name.startsWith("Colors:"_L1) || name.startsWith("ColorEffects:"_L1) || name == "WM"_L1)
-+            Qt6CTColors::copyGroupRecursive(KConfigGroup(scheme, name), KConfigGroup(config, name));
-+    }
++        const KConfigGroup srcKde(scheme, "KDE");
++        for(const char *key : { "contrast", "frameContrast" })
++        {
++            if(srcKde.hasKey(key))
++                group.writeEntry(key, srcKde.readEntry(key, QString()));
++        }
 +
-+    const KConfigGroup srcKde(scheme, "KDE");
-+    for(const char *key : { "contrast", "frameContrast" })
-+    {
-+        if(srcKde.hasKey(key))
-+            group.writeEntry(key, srcKde.readEntry(key, QString()));
++        //same as KDE's own scheme applier: remember which scheme file this is
++        QFile schemeFile(schemePath);
++        if(schemeFile.open(QIODevice::ReadOnly))
++        {
++            QCryptographicHash hash(QCryptographicHash::Sha1);
++            hash.addData(&schemeFile);
++            general.writeEntry("ColorSchemeHash", QString::fromLatin1(hash.result().toHex()));
++        }
++        general.writeEntry("ColorScheme", QFileInfo(schemePath).baseName());
++        general.writeEntry("Name", KConfigGroup(scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
 +    }
-+
-+    //same as KDE's own scheme applier: remember which scheme file this is
-+    QFile schemeFile(schemePath);
-+    if(schemeFile.open(QIODevice::ReadOnly))
-+    {
-+        QCryptographicHash hash(QCryptographicHash::Sha1);
-+        hash.addData(&schemeFile);
-+        general.writeEntry("ColorSchemeHash", QString::fromLatin1(hash.result().toHex()));
-+    }
-+    general.writeEntry("ColorScheme", QFileInfo(schemePath).baseName());
-+    general.writeEntry("Name", KConfigGroup(scheme, "General").readEntry("Name", QFileInfo(schemePath).baseName()));
 +    config->sync();
++
++    //running Oxygen styles and KDE-aware apps only re-read the colors when told to
++    Qt6CTColors::notifyColorSchemeChanged();
 +#endif
  }
  #endif
  
 --- /dev/null
-+++ b/src/qt6ct-common/kcolorschemefill.h
-@@ -0,0 +1,101 @@
-+#ifndef KCOLORSCHEMEFILL_H
-+#define KCOLORSCHEMEFILL_H
++++ b/src/qt6ct-common/kcolorschemeload.h
+@@ -0,0 +1,50 @@
++#ifndef KCOLORSCHEMELOAD_H
++#define KCOLORSCHEMELOAD_H
 +
 +#if defined KF_CONFIGCORE_LIB && defined KF_COLORSCHEME_LIB
 +#include <QMap>
++#include <QProcess>
 +#include <QString>
 +#include <QStringList>
 +#include <KConfig>
 +#include <KConfigGroup>
 +#include <KSharedConfig>
 +
-+//Loads a KColorScheme (.colors) file into an anonymous in-memory config and fills in what the file
-+//leaves out, so that KColorScheme does not fall back to its built-in blue defaults:
-+// - a missing Complementary group is taken from Tooltip (or Window); KColorScheme already derives
-+//   Header from Window by itself
-+// - a missing DecorationFocus / DecorationHover is taken from the other one of the same group, then
-+//   from Window / View / Button, then from the scheme's Selection background (its accent color)
-+//The file itself is never modified.
++//Helpers for KColorScheme (.colors) files. Nothing is filled in for what a scheme leaves out:
++//KColorScheme falls back to its own defaults for that.
 +namespace Qt6CTColors
 +{
++//Opens a .colors file on its own. SimpleConfig keeps kdeglobals out of it, so keys missing from the
++//file are not answered by whatever another scheme left in kdeglobals. One config per file, nothing
++//shared between different schemes; reparse so a file edited on disk is not served from the cache.
++inline KSharedConfigPtr loadColorScheme(const QString &filePath)
++{
++    KSharedConfigPtr c = KSharedConfig::openConfig(filePath, KConfig::SimpleConfig);
++    c->reparseConfiguration();
++    return c;
++}
++
 +inline void copyGroupRecursive(const KConfigGroup &src, KConfigGroup dst)
 +{
 +    const QMap<QString, QString> entries = src.entryMap();
@@ -120,74 +125,17 @@
 +        copyGroupRecursive(src.group(sub), dst.group(sub));
 +}
 +
-+inline QString readKey(const KSharedConfigPtr &c, const QString &group, const char *key)
++//Tells running apps that kdeglobals changed: the signal Oxygen listens to (the one oxygen-settings sends)
++//and KDE's palette-changed notification. dbus-send is used so that no QtDBus link dependency is needed.
++inline void notifyColorSchemeChanged()
 +{
-+    return KConfigGroup(c, group).readEntry(key, QString());
-+}
-+
-+inline void fillMissingColors(const KSharedConfigPtr &c)
-+{
-+    const QStringList groups = c->groupList();
-+    auto has = [&](const char *g) { return groups.contains(QLatin1String(g)); };
-+
-+    QStringList donors;
-+    for(const char *g : { "Colors:Window", "Colors:View", "Colors:Button" })
-+        if(has(g))
-+            donors << QLatin1String(g);
-+    if(donors.isEmpty())
-+        return; //nothing sensible to derive from
-+
-+    //whole groups that are optional in practice
-+    if(!has("Colors:Complementary"))
-+        copyGroupRecursive(KConfigGroup(c, has("Colors:Tooltip") ? "Colors:Tooltip" : "Colors:Window"),
-+                           KConfigGroup(c, "Colors:Complementary"));
-+
-+    //hover / focus decoration colors of every set
-+    QString accent;
-+    if(has("Colors:Selection"))
-+        accent = readKey(c, QStringLiteral("Colors:Selection"), "BackgroundNormal");
-+
-+    auto fillDecoration = [&](KConfigGroup g, const QStringList &from) {
-+        const char *keys[2] = { "DecorationFocus", "DecorationHover" };
-+        const char *sibling[2] = { "DecorationHover", "DecorationFocus" };
-+        for(int i = 0; i < 2; ++i)
-+        {
-+            if(!g.readEntry(keys[i], QString()).isEmpty())
-+                continue;
-+            QString v = g.readEntry(sibling[i], QString()); //same group first
-+            for(int j = 0; v.isEmpty() && j < from.count(); ++j)
-+                v = readKey(c, from.at(j), keys[i]);
-+            for(int j = 0; v.isEmpty() && j < from.count(); ++j)
-+                v = readKey(c, from.at(j), sibling[i]);
-+            if(v.isEmpty())
-+                v = accent;
-+            if(!v.isEmpty())
-+                g.writeEntry(keys[i], v);
-+        }
-+    };
-+    for(const QString &name : donors) //donors first, so that the others can follow them
-+    {
-+        QStringList others = donors;
-+        others.removeAll(name);
-+        fillDecoration(KConfigGroup(c, name), others);
-+    }
-+    for(const char *g : { "Colors:Selection", "Colors:Tooltip", "Colors:Complementary" })
-+        if(c->groupList().contains(QLatin1String(g)))
-+            fillDecoration(KConfigGroup(c, g), donors);
-+}
-+
-+inline KSharedConfigPtr loadCompletedColorScheme(const QString &filePath)
-+{
-+    //anonymous configs are cached and shared, so drop what a previous load left in it
-+    KSharedConfigPtr out = KSharedConfig::openConfig(QString(), KConfig::SimpleConfig);
-+    for(const QString &g : out->groupList())
-+        out->deleteGroup(g);
-+
-+    KConfig src(filePath, KConfig::SimpleConfig);
-+    for(const QString &g : src.groupList())
-+        copyGroupRecursive(KConfigGroup(&src, g), KConfigGroup(out, g));
-+    fillMissingColors(out);
-+    return out;
++    QProcess::startDetached(QStringLiteral("dbus-send"),
++        { QStringLiteral("--session"), QStringLiteral("--type=signal"), QStringLiteral("/OxygenStyle"),
++          QStringLiteral("org.kde.Oxygen.Style.reparseConfiguration") });
++    QProcess::startDetached(QStringLiteral("dbus-send"),
++        { QStringLiteral("--session"), QStringLiteral("--type=signal"), QStringLiteral("/KGlobalSettings"),
++          QStringLiteral("org.kde.KGlobalSettings.notifyChange"),
++          QStringLiteral("int32:0"), QStringLiteral("int32:0") });
 +}
 +}
 +#endif
