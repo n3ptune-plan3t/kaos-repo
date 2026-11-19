@@ -11,7 +11,7 @@
 #  - zip unpacked into its own folder, no pushd
 
 pkgname=brave-origin
-pkgver=1.99.57
+pkgver=1.100.58
 pkgrel=1
 pkgdesc='The minimalist browser from the makers of Brave (binary release)'
 arch=('x86_64')
@@ -25,7 +25,7 @@ source=("${pkgname}-${pkgver}.zip::https://github.com/brave/brave-browser/releas
         "${pkgname}.sh"
         "${pkgname}.desktop")
 noextract=("${pkgname}-${pkgver}.zip")
-sha256sums=('d59a4b6368d6b6e48c086b984c3b26287c850a580d4907128ead545f3428b65b'
+sha256sums=('c10bb3951e03b430263024f35ae4356fe092e93cf7e5df54162b8982992baba2'
             'cd923e77e144bbb0e51c1040e86ffa12099258f88ee43f7c9cd944a3629ee824'
             'c70bc71c696b6764247070375ae111bd76c8bad9c7bda4d46e03975b95571a8a')
 
