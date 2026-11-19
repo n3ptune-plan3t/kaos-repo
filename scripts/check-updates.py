@@ -5,14 +5,30 @@ check-updates.py - compare each packages/<name>/PKGBUILD with its upstream.
   python3 scripts/check-updates.py                    # print a report
   python3 scripts/check-updates.py --sync-issues      # also manage GitHub issues
 
-Per package it works out how upstream is tracked:
-  - "release"  config github_release = "owner/repo": latest non-prerelease
-               GitHub release (needed when tags mix channels, e.g. Brave)
+Per package it works out how upstream is tracked (first match wins):
+  - "release"  config release = true (or github_release = "owner/repo"): latest
+               non-prerelease release from the forge's API. Works for GitHub,
+               GitLab (gitlab.com and self-hosted), Codeberg / Forgejo / Gitea.
+               Needed when tags mix channels, e.g. Brave.
+  - "page"     config scrape = {url, regex}: highest version captured by the
+               regex (group 1) on any web page, for upstreams with no forge
   - "commit"   source pinned with #commit=<sha> or a 40-hex variable: compared
                with the HEAD of the default (or configured) branch
-  - "pypi"     source on files.pythonhosted.org
+  - "pypi"     source on files.pythonhosted.org (or config pypi)
+  - "crates"   source on crates.io (or config crates)
+  - "npm"      source on registry.npmjs.org (or config npm)
   - "tag"      anything else with a git-hosted URL: newest stable tag from
-               `git ls-remote --tags`
+               `git ls-remote --tags` (works on every forge, incl. sourcehut,
+               bitbucket and any self-hosted git server)
+
+Forges are recognised by host: github.com, gitlab.com, invent.kde.org,
+opencode.net, gitlab.gnome.org, gitlab.freedesktop.org, salsa.debian.org,
+codeberg.org, gitea.com, git.sr.ht, bitbucket.org and any host whose first
+label is gitlab*/gitea*/forgejo*. Anything else self-hosted: set "repo" and
+"forge" ("gitlab" | "gitea" | "github" | "git") in update-check.json.
+GitLab nested groups (group/subgroup/project) are supported.
+Optional tokens (only to avoid rate limits / reach private repos):
+GH_TOKEN, GITLAB_TOKEN, CODEBERG_TOKEN (or FORGEJO_TOKEN / GITEA_TOKEN).
 VCS packages (-git, -svn, -hg, ...) track HEAD by design and are skipped.
 
 --sync-issues keeps exactly ONE issue per outdated package (label
@@ -21,8 +37,11 @@ behind, edited if upstream moves again, closed when the PKGBUILD catches up
 or the package is removed. It needs the `gh` CLI and GH_TOKEN.
 
 scripts/update-check.json overrides, per package folder name:
-  skip (bool), repo (url), branch, tag_prefix, github_release ("owner/repo"),
-  pypi (project name), reason (why skipped),
+  skip (bool), reason (why skipped), repo (url), forge, branch, tag_prefix,
+  release (true: use the forge releases API of "repo"/the detected repo),
+  github_release ("owner/repo", shortcut for release on GitHub),
+  pypi / crates / npm (project name),
+  scrape ({"url": ..., "regex": "...(\\d+\\.\\d+)..."}),
   current_var (name of the PKGBUILD variable that holds the real upstream
                version, e.g. "_pkgver", when pkgver is a munged copy of it)
 
@@ -34,6 +53,7 @@ resolved, the package is reported as an error/skipped, never as "outdated",
 and an already-open issue for it is left alone.
 
   python3 scripts/check-updates.py --self-test        # run the built-in tests
+  python3 scripts/check-updates.py --only nvtop       # check just some packages
 """
 import argparse
 import json
@@ -43,6 +63,7 @@ import shlex
 import subprocess
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -52,6 +73,22 @@ HEX40 = re.compile(r"^[0-9a-f]{40}$")
 PRE_RE = re.compile(r"(?i)(^|[._\-])(rc|alpha|beta|pre|dev|snapshot|nightly|test|preview)\d*($|[._\-])")
 VCS_SUFFIXES = ("-git", "-svn", "-hg", "-bzr", "-nightly")
 UNRESOLVED = re.compile(r"[$`]")   # leftover shell syntax in a "resolved" value
+
+# host -> forge type ("github" | "gitlab" | "gitea" | "git" = plain git, tags only)
+KNOWN_FORGES = {
+    "github.com": "github",
+    "gitlab.com": "gitlab", "invent.kde.org": "gitlab", "opencode.net": "gitlab",
+    "gitlab.gnome.org": "gitlab", "gitlab.freedesktop.org": "gitlab",
+    "salsa.debian.org": "gitlab", "framagit.org": "gitlab",
+    "gitlab.archlinux.org": "gitlab", "gitlab.alpinelinux.org": "gitlab",
+    "gitlab.kitware.com": "gitlab", "gitlab.xfce.org": "gitlab",
+    "codeberg.org": "gitea", "gitea.com": "gitea",
+    "git.sr.ht": "git", "bitbucket.org": "git",
+}
+FORGE_TYPES = ("github", "gitlab", "gitea", "git")
+# path pieces that end the "owner/repo" part of a forge URL
+PATH_STOP = re.compile(r"/(?:-|archive|repository|raw|blob|tree|commits?|releases|tags?|issues|"
+                       r"merge_requests|pulls?|wikis?|src|download)(?:/|$)")
 
 
 # ------------------------------------------------------------------ parsing
@@ -350,9 +387,31 @@ def self_test():
         ("$missing", "$missing"), ("${p@U}", "${p@U}"), ("$x", "$x"),
     ]
     bad = [(i, exp, expand(i, s)) for i, exp in cases if expand(i, s) != exp]
+    repo_cases = [
+        ("https://github.com/Syllo/nvtop/archive/refs/tags/3.4.0.tar.gz", None, "https://github.com/Syllo/nvtop"),
+        ("https://www.opencode.net/trialuser/qt6ct/-/archive/0.11/qt6ct-0.11.tar.bz2", None,
+         "https://www.opencode.net/trialuser/qt6ct"),
+        ("https://gitlab.com/a/b/c/-/archive/v1/c-v1.tar.gz", None, "https://gitlab.com/a/b/c"),
+        ("https://gitlab.com/a/b/c/-/releases/v1", None, "https://gitlab.com/a/b/c"),
+        ("https://gitlab.com/a/b/repository/archive.tar.gz?ref=v1", None, "https://gitlab.com/a/b"),
+        ("https://invent.kde.org/utilities/kate.git", None, "https://invent.kde.org/utilities/kate"),
+        ("https://codeberg.org/u/r/archive/v1.tar.gz", None, "https://codeberg.org/u/r"),
+        ("https://codeberg.org/u/r/releases/download/v1/x.zip", None, "https://codeberg.org/u/r"),
+        ("https://gitlab.example.org/g/p/-/tags/1", None, "https://gitlab.example.org/g/p"),
+        ("https://git.example.org/u/r/archive/1.tar.gz", None, None),
+        ("https://git.example.org/u/r/archive/1.tar.gz", "gitea", "https://git.example.org/u/r"),
+        ("https://example.com/foo.tar.gz", None, None),
+    ]
+    bad += [(f"repo_from_url({u!r}, {f!r})", exp, repo_from_url(u, f))
+            for u, f, exp in repo_cases if repo_from_url(u, f) != exp]
+    kind_cases = [("github.com", "github"), ("www.opencode.net", "gitlab"), ("codeberg.org", "gitea"),
+                  ("gitlab.foo.net", "gitlab"), ("forgejo.foo.net", "gitea"), ("git.sr.ht", "git"),
+                  ("example.com", None)]
+    bad += [(f"forge_kind({h!r})", exp, forge_kind(h)) for h, exp in kind_cases if forge_kind(h) != exp]
     for i, exp, got in bad:
         print(f"FAIL {i!r}: expected {exp!r}, got {got!r}")
-    print(f"self-test: {len(cases) - len(bad)}/{len(cases)} passed")
+    total = len(cases) + len(repo_cases) + len(kind_cases)
+    print(f"self-test: {total - len(bad)}/{total} passed")
     return not bad
 
 
@@ -362,10 +421,45 @@ def clean_source(src):
     return src[4:] if src.startswith("git+") else src
 
 
-def repo_from_url(url):
-    m = re.match(r"(https?://(?:github\.com|gitlab\.com|codeberg\.org|bitbucket\.org|git\.sr\.ht|invent\.kde\.org)"
-                 r"/[^/#?]+/[^/#?]+?)(?:\.git)?(?:[/#?]|$)", url)
-    return m.group(1) if m else None
+def forge_kind(host, override=None):
+    """forge type for a host name, or None when it is not a known forge"""
+    if override:
+        return override if override in FORGE_TYPES else None
+    h = (host or "").lower()
+    h = h[4:] if h.startswith("www.") else h
+    if h in KNOWN_FORGES:
+        return KNOWN_FORGES[h]
+    first = h.split(".")[0]
+    for prefix, kind in (("gitlab", "gitlab"), ("gitea", "gitea"), ("forgejo", "gitea"), ("codeberg", "gitea")):
+        if first == prefix or first.startswith(prefix + "-"):
+            return kind
+    return None
+
+
+def repo_from_url(url, forge=None):
+    """https://host/owner/repo (GitLab: host/group/sub/project) out of any
+    archive / release / clone URL on a known forge, else None"""
+    m = re.match(r"https?://([^/\s#?]+)/([^#?\s]+)", url)
+    if not m:
+        return None
+    host, path = m.group(1), "/" + m.group(2)
+    kind = forge_kind(host, forge)
+    if not kind:
+        return None
+    path = PATH_STOP.split(path, 1)[0] if kind == "gitlab" else path
+    segs = [x for x in path.split("/") if x]
+    if kind != "gitlab":
+        segs = segs[:2]
+    if len(segs) < 2:
+        return None
+    if segs[-1].endswith(".git"):
+        segs[-1] = segs[-1][:-4]
+    return f"https://{host}/" + "/".join(segs)
+
+
+def split_repo(repo):
+    u = urllib.parse.urlparse(repo)
+    return u.netloc, u.path.strip("/")
 
 
 def run(cmd, timeout=60):
@@ -395,17 +489,69 @@ def ls_remote_head(repo, branch):
     return r.stdout.split()[0]
 
 
-def http_json(url):
-    headers = {"User-Agent": "kaos-repo-update-checker", "Accept": "application/json"}
-    tok = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
-    if tok and "api.github.com" in url:
-        headers["Authorization"] = f"Bearer {tok}"
+def _open(url, accept):
+    headers = {"User-Agent": "kaos-repo-update-checker", "Accept": accept}
+    env = os.environ.get
+    if "api.github.com" in url:
+        tok = env("GH_TOKEN") or env("GITHUB_TOKEN")
+        if tok:
+            headers["Authorization"] = f"Bearer {tok}"
+    elif "/api/v4/" in url:
+        if env("GITLAB_TOKEN"):
+            headers["PRIVATE-TOKEN"] = env("GITLAB_TOKEN")
+    elif "/api/v1/" in url:
+        tok = env("CODEBERG_TOKEN") or env("FORGEJO_TOKEN") or env("GITEA_TOKEN")
+        if tok:
+            headers["Authorization"] = f"token {tok}"
     try:
-        with urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30) as r:
-            return json.load(r)
+        return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=30)
     except urllib.error.HTTPError as e:
-        hint = " (rate limited? set GH_TOKEN)" if e.code in (401, 403) and "api.github.com" in url else ""
+        hint = ""
+        if e.code in (401, 403, 429):
+            hint = " (rate limited? set GH_TOKEN / GITLAB_TOKEN / CODEBERG_TOKEN)"
         raise RuntimeError(f"HTTP {e.code} for {url}{hint}") from e
+
+
+def http_json(url):
+    with _open(url, "application/json") as r:
+        return json.load(r)
+
+
+def http_text(url):
+    with _open(url, "text/html,text/plain,*/*") as r:
+        return r.read(4_000_000).decode("utf-8", "replace")
+
+
+def forge_latest_release(repo, kind):
+    """tag name of the newest published, non-prerelease release of a repo"""
+    host, path = split_repo(repo)
+    if kind == "github":
+        return http_json(f"https://api.github.com/repos/{path}/releases/latest")["tag_name"]
+    if kind == "gitlab":
+        pid = urllib.parse.quote(path, safe="")
+        for r in http_json(f"https://{host}/api/v4/projects/{pid}/releases?per_page=30"):
+            if not r.get("upcoming_release") and not PRE_RE.search(r["tag_name"]):
+                return r["tag_name"]
+        raise RuntimeError("no stable releases on GitLab (project may only use tags)")
+    if kind == "gitea":
+        for r in http_json(f"https://{host}/api/v1/repos/{path}/releases?limit=30&draft=false"):
+            if not r.get("draft") and not r.get("prerelease"):
+                return r["tag_name"]
+        raise RuntimeError("no stable releases on Gitea/Forgejo (project may only use tags)")
+    raise RuntimeError(f"no releases API for {host}; set \"forge\" in update-check.json or drop \"release\"")
+
+
+def scrape_latest(spec):
+    """highest stable version matched by spec['regex'] (group 1) on spec['url']"""
+    rx = re.compile(spec["regex"])
+    found = []
+    for m in rx.finditer(http_text(spec["url"])):
+        v = m.group(1) if rx.groups else m.group(0)
+        if v and not PRE_RE.search(v):
+            found.append(v)
+    if not found:
+        raise RuntimeError("scrape regex matched nothing")
+    return max(found, key=vkey)
 
 
 def strip_prefix(tag, prefixes):
@@ -460,22 +606,35 @@ def check_package(folder, root, cfg):
                    "note": f"version '{current}' cannot be resolved statically; set \"current_var\" "
                            "(e.g. \"_pkgver\") or \"skip\" in scripts/update-check.json"}
 
-        # 1. configured GitHub release channel
-        if o.get("github_release"):
+        # where does upstream live?  explicit config first, then the sources / url=
+        forge_hint = o.get("forge")
+        repo = o.get("repo")
+        if not repo and o.get("github_release"):
+            repo = f"https://github.com/{o['github_release']}"
+        if not repo:
+            for s in srcs + [expand(scalars.get("url", ""), scalars)]:
+                repo = repo_from_url(s, forge_hint)
+                if repo:
+                    break
+        kind = forge_kind(split_repo(repo)[0], forge_hint) if repo else None
+        prefixes_cfg = [o["tag_prefix"]] if "tag_prefix" in o else None
+
+        if o.get("release") or o.get("github_release"):
+            # 1. forge releases API (GitHub / GitLab / Codeberg / Forgejo / Gitea)
             if bad:
                 return {**res, **bad}
-            slug = o["github_release"]
-            tag = http_json(f"https://api.github.com/repos/{slug}/releases/latest")["tag_name"]
-            res.update(kind="release", source=f"https://github.com/{slug}",
-                       latest=strip_prefix(tag, [o.get("tag_prefix", "v"), "v", "V"]))
-        else:
-            repo = o.get("repo")
             if not repo:
-                for s in srcs + [expand(scalars.get("url", ""), scalars)]:
-                    repo = repo_from_url(s)
-                    if repo:
-                        break
-            # 2. pinned commit
+                raise RuntimeError("no repo found for release lookup; set \"repo\" in update-check.json")
+            tag = forge_latest_release(repo, kind)
+            res.update(kind="release", source=repo,
+                       latest=strip_prefix(tag, (prefixes_cfg or [""]) + ["v", "V"]))
+        elif o.get("scrape"):
+            # 2. any web page
+            if bad:
+                return {**res, **bad}
+            res.update(kind="page", source=o["scrape"]["url"], latest=scrape_latest(o["scrape"]))
+        else:
+            # 3. pinned commit
             pinned = None
             for s in srcs:
                 m = re.search(r"#commit=([0-9a-f]{40})", s)
@@ -488,26 +647,40 @@ def check_package(folder, root, cfg):
                         pinned = v
             if bad and not (pinned and repo):
                 return {**res, **bad}
-            pypi = o.get("pypi")
-            if not pypi:
-                for s in srcs:
-                    m = re.search(r"pythonhosted\.org/packages/source/./([^/]+)/", s)
-                    if m:
-                        pypi = m.group(1)
             if pinned and repo:
                 head = ls_remote_head(repo, o.get("branch"))
                 res.update(kind="commit", source=repo, current=pinned[:12], latest=head[:12],
                            outdated=pinned != head)
                 return res
+            pypi, crates, npm = o.get("pypi"), o.get("crates"), o.get("npm")
+            for s in srcs:
+                m = re.search(r"pythonhosted\.org/packages/source/./([^/]+)/", s)
+                if m and not pypi:
+                    pypi = m.group(1)
+                m = re.search(r"crates\.io/(?:api/v1/)?crates/([^/]+)/", s)
+                if m and not crates:
+                    crates = m.group(1)
+                m = re.search(r"registry\.npmjs\.org/(@[^/]+/[^/]+|[^/@][^/]*)/-/", s)
+                if m and not npm:
+                    npm = m.group(1)
+            # 4. package registries
             if pypi:
                 latest = http_json(f"https://pypi.org/pypi/{pypi}/json")["info"]["version"]
                 res.update(kind="pypi", source=f"https://pypi.org/project/{pypi}/", latest=latest)
+            elif crates:
+                latest = http_json(f"https://crates.io/api/v1/crates/{crates}")["crate"]["max_stable_version"]
+                res.update(kind="crates", source=f"https://crates.io/crates/{crates}", latest=latest)
+            elif npm:
+                latest = http_json(f"https://registry.npmjs.org/{npm.replace('/', '%2f')}/latest")["version"]
+                res.update(kind="npm", source=f"https://www.npmjs.com/package/{npm}", latest=latest)
             elif repo:
-                prefixes = [o["tag_prefix"]] if "tag_prefix" in o else ["v", "V", f"{name}-", f"{repo.rsplit('/', 1)[-1]}-", ""]
+                # 5. newest stable tag, via plain git: works on any forge
+                prefixes = prefixes_cfg or ["v", "V", f"{name}-", f"{repo.rsplit('/', 1)[-1]}-", ""]
                 res.update(kind="tag", source=repo, latest=latest_stable_tag(repo, prefixes))
             else:
                 return {**res, "status": "skipped",
-                        "note": "no git-hosted or PyPI source found; add 'repo' to update-check.json"}
+                        "note": "no forge / registry source found; add \"repo\" (and \"forge\" if self-hosted), "
+                                "\"release\" or \"scrape\" to update-check.json"}
         res["outdated"] = bool(current) and is_newer(res["latest"], current)
     except Exception as e:  # noqa
         res.update(status="error", note=str(e)[:300])
@@ -597,6 +770,7 @@ def main():
     ap.add_argument("--sync-issues", action="store_true", help="open/edit/close one issue per package")
     ap.add_argument("--dry-run", action="store_true", help="with --sync-issues: only print what would happen")
     ap.add_argument("--self-test", action="store_true", help="test the PKGBUILD version resolver and exit")
+    ap.add_argument("--only", action="append", metavar="NAME", help="only check these package folders (repeatable)")
     a = ap.parse_args()
     if a.self_test:
         sys.exit(0 if self_test() else 1)
@@ -606,6 +780,8 @@ def main():
         cfg = {k: v for k, v in json.loads(Path(a.config).read_text()).items() if not k.startswith("_")}
     root = Path(a.packages_dir)
     folders = sorted(p.parent.name for p in root.glob("*/PKGBUILD"))
+    if a.only:
+        folders = [f for f in folders if f in a.only]
     with ThreadPoolExecutor(max_workers=8) as ex:
         results = list(ex.map(lambda f: check_package(f, root, cfg), folders))
 
