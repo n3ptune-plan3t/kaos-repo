@@ -1,0 +1,15 @@
+--- a/src/qt6ct-qtplugin/qt6ctplatformtheme.cpp
++++ b/src/qt6ct-qtplugin/qt6ctplatformtheme.cpp
+@@ -261,6 +261,13 @@ void Qt6CTPlatformTheme::applySettings()
+     if(m_update)
+     {
+         QWindowSystemInterface::handleThemeChange();
+         QCoreApplication::postEvent(qGuiApp, new QEvent(QEvent::ApplicationFontChange));
++
++        //Union's KColorSchemeProvider (and anything else caching KColorScheme values) only re-resolves
++        //on ApplicationPaletteChange. Qt skips it when the QPalette is identical, which is the case for
++        //schemes that differ only in decoration/frame/effects colors, so send it ourselves.
++        //Only qApp's event filters see this; the property above is already set at this point.
++        QEvent paletteEvent(QEvent::ApplicationPaletteChange);
++        QCoreApplication::sendEvent(qApp, &paletteEvent);
+     }
