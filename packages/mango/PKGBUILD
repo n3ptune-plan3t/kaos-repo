@@ -1,0 +1,33 @@
+pkgname=mango
+pkgver=0.19.0
+pkgrel=1
+pkgdesc='Practical, lightweight dwl-based Wayland compositor (tags, scroller layouts, scenefx effects)'
+arch=('x86_64')
+url='https://github.com/mangowm/mango'
+license=('GPL3')
+depends=('wlroots' 'scenefx' 'cjson' 'wayland' 'libdrm' 'libinput' 'libxkbcommon'
+         'pcre2' 'pixman' 'pango' 'cairo' 'libglvnd' 'libxcb' 'xcb-util-wm'
+         'xwayland')
+makedepends=('meson' 'ninja' 'wayland-protocols' 'pkg-config')
+optdepends=('xdg-desktop-portal-wlr: screen sharing'
+            'foot: terminal'
+            'swaybg: wallpaper')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/mangowm/mango/archive/refs/tags/$pkgver.tar.gz")
+sha256sums=('1c2bf90eff49ebc9ec512f70691056963db5eac7ba380e911963fb92d23ae20c')
+
+build() {
+  meson setup build "$pkgname-$pkgver" \
+    --prefix=/usr \
+    --sysconfdir=/etc \
+    --libdir=lib \
+    --buildtype=release \
+    -Dxwayland=enabled
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 "$pkgname-$pkgver/LICENSE" -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 "$pkgname-$pkgver/assets/mango.svg" \
+    "$pkgdir/usr/share/icons/hicolor/scalable/apps/mango.svg"
+}

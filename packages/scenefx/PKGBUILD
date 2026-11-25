@@ -1,0 +1,26 @@
+pkgname=scenefx
+pkgver=0.5
+pkgrel=1
+pkgdesc='wlroots scene-graph drop-in with GLES2 effects (blur, shadows, rounded corners)'
+arch=('x86_64')
+url='https://github.com/wlrfx/scenefx'
+license=('MIT')
+depends=('wlroots' 'wayland' 'libdrm' 'libxkbcommon' 'pixman' 'libglvnd')
+makedepends=('meson' 'ninja' 'wayland-protocols' 'pkg-config')
+source=("$pkgname-$pkgver.tar.gz::https://github.com/wlrfx/scenefx/archive/refs/tags/$pkgver.tar.gz")
+sha256sums=('0fa8ecca0e310f813efd052624c5ed7d9153d6a0fdead5cc957d34c07f9a86c6')
+
+build() {
+  meson setup build "$pkgname-$pkgver" \
+    --prefix=/usr \
+    --libdir=lib \
+    --buildtype=release \
+    -Dexamples=false \
+    -Dwerror=false
+  meson compile -C build
+}
+
+package() {
+  meson install -C build --destdir "$pkgdir"
+  install -Dm644 "$pkgname-$pkgver/LICENSE" -t "$pkgdir/usr/share/licenses/$pkgname/"
+}

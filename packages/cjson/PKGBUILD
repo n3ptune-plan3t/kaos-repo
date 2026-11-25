@@ -1,0 +1,26 @@
+pkgname=cjson
+pkgver=1.7.19
+pkgrel=1
+pkgdesc='Ultralightweight JSON parser in ANSI C (provides libcjson.pc)'
+arch=('x86_64')
+url='https://github.com/DaveGamble/cJSON'
+license=('MIT')
+depends=('glibc')
+makedepends=('cmake' 'ninja')
+source=("cJSON-$pkgver.tar.gz::https://github.com/DaveGamble/cJSON/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('7fa616e3046edfa7a28a32d5f9eacfd23f92900fe1f8ccd988c1662f30454562')
+
+build() {
+  cmake -S cJSON-$pkgver -B build -G Ninja \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib \
+    -DENABLE_CJSON_TEST=OFF \
+    -DENABLE_CJSON_UTILS=ON
+  cmake --build build
+}
+
+package() {
+  DESTDIR="$pkgdir" cmake --install build
+  install -Dm644 cJSON-$pkgver/LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+}
