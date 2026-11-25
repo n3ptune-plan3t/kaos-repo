@@ -15,6 +15,7 @@ build() {
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=lib \
+    -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
     -DENABLE_CJSON_TEST=OFF \
     -DENABLE_CJSON_UTILS=ON
   cmake --build build
