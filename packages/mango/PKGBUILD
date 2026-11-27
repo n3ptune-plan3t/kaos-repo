@@ -1,5 +1,5 @@
 pkgname=mango
-pkgver=0.19.0
+pkgver=0.19.3
 pkgrel=1
 pkgdesc='Practical, lightweight dwl-based Wayland compositor (tags, scroller layouts, scenefx effects)'
 arch=('x86_64')
@@ -13,7 +13,7 @@ optdepends=('xdg-desktop-portal-wlr: screen sharing'
             'foot: terminal'
             'swaybg: wallpaper')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mangowm/mango/archive/refs/tags/$pkgver.tar.gz")
-sha256sums=('1c2bf90eff49ebc9ec512f70691056963db5eac7ba380e911963fb92d23ae20c')
+sha256sums=('32a49ea74b87da5e3adfb5b3d1983c7c0dfc6f4d097e9065f5cbe62042b07e3d')
 
 build() {
   meson setup build "$pkgname-$pkgver" \
