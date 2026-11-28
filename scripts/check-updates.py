@@ -6,18 +6,18 @@ check-updates.py - compare each packages/<name>/PKGBUILD with its upstream.
   python3 scripts/check-updates.py --sync-issues      # also manage GitHub issues
 
 Per package it works out how upstream is tracked (first match wins):
-  - "release"  config release = true (or github_release = "owner/repo"): latest
+- "release"  config release = true (or github_release = "owner/repo"): latest
                non-prerelease release from the forge's API. Works for GitHub,
                GitLab (gitlab.com and self-hosted), Codeberg / Forgejo / Gitea.
                Needed when tags mix channels, e.g. Brave.
-  - "page"     config scrape = {url, regex}: highest version captured by the
+- "page"     config scrape = {url, regex}: highest version captured by the
                regex (group 1) on any web page, for upstreams with no forge
-  - "commit"   source pinned with #commit=<sha> or a 40-hex variable: compared
+- "commit"   source pinned with #commit=<sha> or a 40-hex variable: compared
                with the HEAD of the default (or configured) branch
-  - "pypi"     source on files.pythonhosted.org (or config pypi)
-  - "crates"   source on crates.io (or config crates)
-  - "npm"      source on registry.npmjs.org (or config npm)
-  - "tag"      anything else with a git-hosted URL: newest stable tag from
+- "pypi"     source on files.pythonhosted.org (or config pypi)
+- "crates"   source on crates.io (or config crates)
+- "npm"      source on registry.npmjs.org (or config npm)
+- "tag"      anything else with a git-hosted URL: newest stable tag from
                `git ls-remote --tags` (works on every forge, incl. sourcehut,
                bitbucket and any self-hosted git server)
 
@@ -30,6 +30,10 @@ GitLab nested groups (group/subgroup/project) are supported.
 Optional tokens (only to avoid rate limits / reach private repos):
 GH_TOKEN, GITLAB_TOKEN, CODEBERG_TOKEN (or FORGEJO_TOKEN / GITEA_TOKEN).
 VCS packages (-git, -svn, -hg, ...) track HEAD by design and are skipped.
+
+Every issue also carries the sha256 of the NEW source archives (downloaded and
+hashed by the checker) as a ready-to-paste sha256sums=(...) array, so the
+PKGBUILD can be updated by hand without running updpkgsums.
 
 --sync-issues keeps exactly ONE issue per outdated package (label
 "upstream-updates", marker <!-- pkg:NAME -->): opened when a package falls
@@ -56,6 +60,7 @@ and an already-open issue for it is left alone.
   python3 scripts/check-updates.py --only nvtop       # check just some packages
 """
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -650,7 +655,7 @@ def check_package(folder, root, cfg):
             if pinned and repo:
                 head = ls_remote_head(repo, o.get("branch"))
                 res.update(kind="commit", source=repo, current=pinned[:12], latest=head[:12],
-                           outdated=pinned != head)
+                           current_full=pinned, latest_full=head, outdated=pinned != head)
                 return res
             pypi, crates, npm = o.get("pypi"), o.get("crates"), o.get("npm")
             for s in srcs:
@@ -687,6 +692,145 @@ def check_package(folder, root, cfg):
     return res
 
 
+# ------------------------------------------------------------------ checksums
+SUMS_OK = "<!-- sha256:ok -->"
+
+
+def parse_sums(path):
+    """entries of every sha256sums / sha256sums_x86_64 array, in file order
+    (same order parse_pkgbuild() uses for source / source_x86_64)"""
+    text = strip_comments(Path(path).read_text(errors="replace"))
+    sums = []
+    for m in re.finditer(r"^[ \t]*sha256sums(?:_x86_64)?(\+?)=\(", text, re.M):
+        sums += words(grab_array(text, m.end()))
+    return sums
+
+
+def source_parts(src):
+    """(local file name, url, kind) of one expanded source entry;
+    kind is remote (downloadable), vcs (git+..., makepkg uses SKIP) or local"""
+    m = re.match(r"^([^:/]+)::(.*)$", src)
+    fname, url = (m.group(1), m.group(2)) if m else (None, src)
+    url = url.split("#", 1)[0]
+    if re.match(r"^(git|svn|hg|bzr)(\+|://)", url) or url.endswith(".git"):
+        kind = "vcs"
+    elif re.match(r"^(https?|ftp)://", url):
+        kind = "remote"
+    else:
+        kind = "local"
+    if not fname:
+        fname = urllib.parse.unquote(urllib.parse.urlparse(url).path.rsplit("/", 1)[-1]) or url
+    return fname, url, kind
+
+def sha256_url(url, tries=3):
+    """stream-download url, return (sha256 hex, size in bytes)"""
+    last = None
+    for _ in range(tries):
+        try:
+            h, n = hashlib.sha256(), 0
+            req = urllib.request.Request(url, headers={"User-Agent": "kaos-repo-update-checker"})
+            with urllib.request.urlopen(req, timeout=120) as r:
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    h.update(chunk)
+                    n += len(chunk)
+            return h.hexdigest(), n
+        except Exception as e:  # noqa
+            last = e
+    raise RuntimeError(str(last)[:200])
+
+
+def sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def new_source_sums(r, root, cfg):
+    """sha256 of every source the PKGBUILD will have at the NEW version.
+    Sources are re-expanded with the new version substituted for the old one
+    (pinned-commit packages: new sha for old sha); remote archives are
+    downloaded and hashed; git+ sources stay SKIP; local files keep the
+    checksum already in the PKGBUILD.  Returns a list of dicts."""
+    folder = r["package"]
+    o = cfg.get(folder, {})
+    pkgfile = Path(root) / folder / "PKGBUILD"
+    scalars, sources = parse_pkgbuild(pkgfile)
+    old_sums = parse_sums(pkgfile)
+    scalars.setdefault("pkgname", scalars.get("pkgname", folder))
+
+    if r["kind"] == "commit":
+        srcs = [expand(x, scalars).replace(r["current_full"], r["latest_full"]) for x in sources]
+    else:
+        s2 = dict(scalars)
+        current = expand(scalars.get(o.get("current_var") or "pkgver", ""), scalars)
+        # every variable that holds the current version moves to the new one,
+        # so sources written with $pkgver, $_ver, ... all follow
+        for k, v in scalars.items():
+            if k not in ("pkgrel", "epoch") and current and expand(v, scalars) == current:
+                s2[k] = r["latest"]
+        s2[o.get("current_var") or "pkgver"] = r["latest"]
+        srcs = [expand(x, s2) for x in sources]
+
+    parts = [source_parts(x) for x in srcs]
+    aligned = len(old_sums) == len(srcs)
+    out = [{"file": f, "url": u, "kind": k, "sum": None, "size": None, "error": None}
+           for f, u, k in parts]
+
+    def work(i):
+        e = out[i]
+        if e["kind"] == "vcs":
+            e["sum"] = "SKIP"
+        elif e["kind"] == "local":
+            local = pkgfile.parent / e["file"]
+            if aligned:
+                e["sum"] = old_sums[i]
+            elif local.is_file():
+                e["sum"] = sha256_file(local)
+            else:
+                e["sum"] = "SKIP"
+        else:
+            if "$" in e["url"]:
+                e["error"] = "url still has unresolved variables"
+                return
+            try:
+                e["sum"], e["size"] = sha256_url(e["url"])
+            except Exception as ex:  # noqa
+                e["error"] = str(ex)
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        list(ex.map(work, range(len(out))))
+    return out
+
+
+def sums_section(entries):
+    """markdown for the issue body: paste-ready array + per-file table"""
+    if not entries:
+        return ""
+    vals = [e["sum"] or "DOWNLOAD-FAILED" for e in entries]
+    arr = "sha256sums=(" + ("\n" + " " * 12).join(f"'{v}'" for v in vals) + ")"
+    lines = ["", "### New source checksums (sha256)", "",
+             "Replace the `sha256sums` array in the PKGBUILD with:", "",
+             "```bash", arr, "```", "",
+             "| file | sha256 | size |", "|---|---|---|"]
+    for e in entries:
+        size = f"{e['size'] / 1048576:.1f} MiB" if e["size"] else ""
+        cell = f"`{e['sum']}`" if e["sum"] else f"⚠️ {e['error']}"
+        lines.append(f"| `{e['file']}` | {cell} | {size} |")
+    lines += ["", "`SKIP` = git source or an unchanged local file; its checksum is not affected by the update."]
+    failed = [e for e in entries if e["error"]]
+    if failed:
+        lines += ["", "⚠️ Some downloads failed; they are retried on the next run "
+                      "(or run `updpkgsums`)."]
+    else:
+        lines += ["", SUMS_OK]
+    return "\n".join(lines) + "\n"
+
+
 # --------------------------------------------------------------------- issues
 def gh(*args):
     r = subprocess.run(["gh", *args], capture_output=True, text=True)
@@ -699,7 +843,7 @@ def issue_title(r):
     return f"[{r['package']}] update available: {r['current']} → {r['latest']}"
 
 
-def issue_body(r):
+def issue_body(r, sums=""):
     what = "commit" if r["kind"] == "commit" else "version"
     return (
         f"<!-- pkg:{r['package']} -->\n"
@@ -710,13 +854,16 @@ def issue_body(r):
         f"| Source | {r['source']} |\n\n"
         f"To update, edit `packages/{r['package']}/PKGBUILD`"
         + (" (pinned commit variable, " if r["kind"] == "commit" else " (`pkgver`, ")
-        + "reset `pkgrel=1`), refresh checksums with `updpkgsums` (or `makepkg -g`), "
-        "and push. The push builds and publishes the package automatically.\n\n"
-        "_Opened by the update checker; it edits or closes this issue by itself._\n"
+        + "reset `pkgrel=1`), paste the checksums below into `sha256sums` "
+        "(or refresh them with `updpkgsums`), and push. "
+        "The push builds and publishes the package automatically.\n"
+        + sums
+        + "\n_Opened by the update checker; it edits or closes this issue by itself._\n"
     )
 
 
-def sync_issues(results, dry=False):
+def sync_issues(results, dry=False, root="packages", cfg=None):
+    cfg = cfg or {}
     log = []
     if not dry:
         try:
@@ -736,8 +883,18 @@ def sync_issues(results, dry=False):
     for pkg, r in state.items():
         if not r["outdated"]:
             continue
-        title, body = issue_title(r), issue_body(r)
+        title = issue_title(r)
         it = by_pkg.get(pkg)
+        if dry:
+            body = (it or {}).get("body") or issue_body(r)      # no downloads in a dry run
+        elif it and it["title"] == title and SUMS_OK in (it.get("body") or ""):
+            body = it["body"]                                   # already hashed for this version
+        else:
+            try:
+                body = issue_body(r, sums_section(new_source_sums(r, root, cfg)))
+            except Exception as e:  # noqa
+                log.append(f"sums   {pkg}: {e}")
+                body = issue_body(r)
         if it is None:
             log.append(f"open   #{pkg}: {title}")
             if not dry:
@@ -799,7 +956,7 @@ def main():
 
     log = []
     if a.sync_issues:
-        log = sync_issues(results, dry=a.dry_run)
+        log = sync_issues(results, dry=a.dry_run, root=a.packages_dir, cfg=cfg)
         lines += ["", "## Issues"] + [f"- {x}" for x in log] if log else []
     md = "\n".join(lines) + "\n"
     print(md)
