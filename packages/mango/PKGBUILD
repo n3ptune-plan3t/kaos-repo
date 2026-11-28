@@ -1,17 +1,14 @@
 pkgname=mango
 pkgver=0.19.4
-pkgrel=1
-pkgdesc='Practical, lightweight dwl-based Wayland compositor (tags, scroller layouts, scenefx effects)'
+pkgrel=2
+pkgdesc='Practical, lightweight dwl-based Wayland compositor'
 arch=('x86_64')
 url='https://github.com/mangowm/mango'
 license=('GPL3')
 depends=('wlroots' 'scenefx' 'cjson' 'wayland' 'libdrm' 'libinput' 'libxkbcommon'
          'pcre2' 'pixman' 'pango' 'cairo' 'libglvnd' 'libxcb' 'xcb-util-wm'
-         'xwayland')
+         'xwayland' 'xdg-desktop-portal-wlr')
 makedepends=('meson' 'ninja' 'wayland-protocols' 'pkg-config')
-optdepends=('xdg-desktop-portal-wlr: screen sharing'
-            'foot: terminal'
-            'swaybg: wallpaper')
 source=("$pkgname-$pkgver.tar.gz::https://github.com/mangowm/mango/archive/refs/tags/$pkgver.tar.gz")
 sha256sums=('c4573ab52e76d38850d2b5e6982fcf16ee1f664cb327bd88a5b05f26676642fa')
 
